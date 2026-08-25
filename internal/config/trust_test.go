@@ -34,7 +34,7 @@ func TestTrustRoundTrip(t *testing.T) {
 }
 
 func TestTrustPromptFlag(t *testing.T) {
-	t.Setenv("LOOPY_HOME", t.TempDir())
+	t.Setenv("WHIP_HOME", t.TempDir())
 	if TrustPromptDisabled() {
 		t.Fatal("prompt should be enabled by default")
 	}
