@@ -32,6 +32,7 @@ import (
 	"github.com/context-labs/whip/internal/memory"
 	"github.com/context-labs/whip/internal/session"
 	"github.com/context-labs/whip/internal/skills"
+	"github.com/context-labs/whip/internal/theme"
 	"github.com/context-labs/whip/internal/tools"
 	"github.com/context-labs/whip/internal/tools/bashrun"
 	"github.com/context-labs/whip/internal/update"
@@ -40,18 +41,121 @@ import (
 	"github.com/muesli/termenv"
 )
 
-// UI styles use AdaptiveColor so they stay legible on both dark and light
-// terminal backgrounds (detected at startup by detectColorScheme).
+// UI styles are package vars so a theme switch can swap them live. The agent
+// goroutines only send messages; rendering and setTheme both run in Update/View,
+// so swapping these remains race-clean.
 var (
-	youStyle  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "21", Dark: "12"}).Bold(true) // blue
-	botStyle  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "90", Dark: "13"}).Bold(true) // purple/magenta
-	toolStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "136", Dark: "11"})           // amber
-	dimStyle  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "240", Dark: "245"})          // mid gray
-	errStyle  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "9"})            // red
-	// thinkingStyle renders reasoning tokens: dim and italic so they're
-	// visually distinct from the answer.
+	youStyle      = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "21", Dark: "12"}).Bold(true) // blue
+	botStyle      = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "90", Dark: "13"}).Bold(true) // purple/magenta
+	toolStyle     = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "136", Dark: "11"})           // amber
+	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "240", Dark: "245"})          // mid gray
+	errStyle      = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "9"})            // red
 	thinkingStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "240", Dark: "245"}).Italic(true)
 )
+
+func syncStyles(s theme.StyleSet) {
+	youStyle, botStyle, toolStyle = s.You, s.Bot, s.Tool
+	dimStyle, errStyle, thinkingStyle = s.Dim, s.Error, s.Thinking
+}
+
+// syncMarkdown drives the TUI's own glamour markdown cache (renderMarkdown
+// in markdown.go) from the theme's resolved background, instead of calling
+// SetLightTheme/SetUnknownTheme directly from each setTheme branch. When
+// determined is false the background couldn't be read (auto, no signal) and
+// markdown renders in the neutral default style.
+func syncMarkdown(s theme.StyleSet) {
+	if !s.Determined {
+		SetUnknownTheme()
+		return
+	}
+	SetLightTheme(s.Bg == theme.BgLight)
+}
+
+// probeBackground is the single terminal-background detection implementation,
+// pure (no markdown/style side effects), returning the resolved background,
+// whether it was determined, and a short human source string for the UI note.
+// Both detectBackground (the theme.DetectFunc) and detectColorScheme (the
+// tested wrapper that also applies the TUI markdown side effects) delegate
+// here so the priority chain lives once:
+//
+//	WHIP_THEME env > COLORFGBG > OSC 11 query on /dev/tty > termenv fallback
+//	> undetermined (neutral default).
+//
+// A config "theme" of light/dark is handled before this — setTheme routes
+// those straight to theme.Apply's built-in branch — so probeBackground only
+// runs for auto.
+func probeBackground() (bg theme.Background, determined bool, source string) {
+	setResult := func(light bool, source string) (theme.Background, bool, string) {
+		return bgFromLight(light), true, source
+	}
+	switch strings.ToLower(os.Getenv("WHIP_THEME")) {
+	case "light":
+		return setResult(true, "WHIP_THEME")
+	case "dark":
+		return setResult(false, "WHIP_THEME")
+	}
+	// Never run an OSC query while Bubble Tea owns the tty: changing raw-mode
+	// settings under its input reader can produce a spurious EOF and freeze input.
+	if tuiRunning {
+		if bgCache.valid {
+			return setResult(bgCache.light, "terminal query (cached from startup)")
+		}
+		light, ok, how := fallbackScheme(inTmuxEnv(), os.Getenv("COLORFGBG"))
+		if !ok {
+			return theme.BgDark, false, how
+		}
+		return setResult(light, how)
+	}
+
+	inTmux := inTmuxEnv()
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err == nil {
+		if light, ok := queryTerminalBackground(tty, inTmux); ok {
+			_ = tty.Close()
+			bgCache = bgResult{light: light, valid: true}
+			if inTmux {
+				return setResult(light, "terminal query (inside tmux)")
+			}
+			return setResult(light, "terminal query")
+		}
+		if !inTmux {
+			type result struct{ light bool }
+			done := make(chan result, 1)
+			go func() {
+				o := termenv.NewOutput(tty)
+				done <- result{light: !o.HasDarkBackground()}
+			}()
+			select {
+			case r := <-done:
+				_ = tty.Close()
+				bgCache = bgResult{light: r.light, valid: true}
+				return setResult(r.light, "terminal query")
+			case <-time.After(300 * time.Millisecond):
+			}
+		}
+		_ = tty.Close()
+	}
+	light, ok, how := fallbackScheme(inTmux, os.Getenv("COLORFGBG"))
+	if !ok {
+		return theme.BgDark, false, how
+	}
+	return setResult(light, how)
+}
+
+func bgFromLight(light bool) theme.Background {
+	if light {
+		return theme.BgLight
+	}
+	return theme.BgDark
+}
+
+// detectBackground is the theme.DetectFunc passed to theme.Apply: the pure
+// detection half, no side effects (applyTheme drives the TUI markdown cache
+// via syncMarkdown from the resulting StyleSet).
+func detectBackground() (theme.Background, bool) {
+	bg, determined, _ := probeBackground()
+	return bg, determined
+}
 
 // messages sent from the agent goroutine
 type (
@@ -416,8 +520,9 @@ func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string, ca
 		enableClickWheelMouse(os.Stdout)
 		applyTmuxMouseFix()
 	}
-	// pick the glamour style that matches the pick/detection resolution;
-	// keep how detection resolved so /report can name the source
+	// Load user themes before applying the persisted selection. Keep how auto
+	// detection resolved so /report can name the source.
+	m.loadThemes()
 	m.themeHow = m.applyTheme(cfg.Theme)
 	if m.cfgExtra == nil {
 		m.cfgExtra = map[string]string{}
@@ -822,60 +927,73 @@ func (m *model) persist() {
 	m.saved = len(m.agent.Messages)
 }
 
-// setTheme switches the color scheme ("light"/"dark"/"auto") live and
-// persists the pick to the global config: markdown re-renders under the new
-// glamour style and every AdaptiveColor UI style follows lipgloss. A theme
-// file change in ANOTHER running whip session is picked up live via
-// syncThemeMsg.
-func (m *model) setTheme(theme string) {
-	if theme != "light" && theme != "dark" {
-		theme = "auto"
+// setTheme switches the active theme live and persists it. Built-ins and user
+// themes share the same apply path; auto persists as "" like before.
+func (m *model) setTheme(name string) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	m.loadThemes()
+	if _, ok := theme.Find(theme.All(), name); !ok {
+		name = "auto"
 	}
-	how := m.applyTheme(theme)
+	how := m.applyTheme(name)
 	m.themeHow = how // explicit picks return "" — detection source no longer applies
-	m.cfg.Theme = theme
-	if theme == "auto" {
+	m.cfg.Theme = name
+	if name == "auto" {
 		m.cfg.Theme = "" // auto persists as "" (omitted = auto-detect)
 	}
 	if m.cfgExtra == nil {
 		m.cfgExtra = map[string]string{}
 	}
-	if theme == "auto" {
-		delete(m.cfgExtra, "theme") // explicit pick, not omission
+	if name == "auto" {
+		delete(m.cfgExtra, "theme")
 	} else {
-		m.cfgExtra["theme"] = theme
+		m.cfgExtra["theme"] = name
 	}
 	if err := m.cfg.Save(); err != nil {
 		m.append(errStyle.Render("config save failed: " + err.Error()))
 	}
-	m.refreshVP() // re-render the transcript under the new scheme
-	if theme == "auto" {
+	m.refreshVP()
+	if name == "auto" {
 		m.append(dimStyle.Render(fmt.Sprintf("◐ theme: %s (auto: %s)", CurrentTheme(), how)))
-	} else {
-		m.append(dimStyle.Render("◐ theme: " + CurrentTheme()))
+		return
 	}
+	m.append(dimStyle.Render("◐ theme: " + theme.Active()))
 }
 
-// applyTheme points rendering at a scheme WITHOUT persisting: auto re-detects
-// (re-reading the terminal background so switching dark→auto can't stay dark),
-// explicit picks override detection directly. Called by setTheme, startup, and
-// the config watcher. how (only meaningful for auto) names the detection
-// source so a wrong pick is diagnosable in the transcript note.
-func (m *model) applyTheme(theme string) (how string) {
-	switch theme {
-	case "light":
-		SetLightTheme(true)
-		lipgloss.SetHasDarkBackground(false)
-		setSchemeOverride("light")
-	case "dark":
-		SetLightTheme(false)
-		lipgloss.SetHasDarkBackground(true)
-		setSchemeOverride("dark")
-	default: // auto: don't touch m.cfg.Theme — setTheme owns persistence
+// applyTheme points rendering at a scheme without persisting. The config
+// watcher calls this for changes made by another Whip session.
+func (m *model) applyTheme(name string) (how string) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || name == "auto" {
 		setSchemeOverride("")
-		how = detectColorScheme()
+		bg, determined, source := probeBackground()
+		theme.ApplyAuto(bg, determined)
+		how = source
+	} else {
+		how = theme.Apply(name, detectBackground)
+		if name == "light" || name == "dark" {
+			setSchemeOverride(name)
+		} else {
+			setSchemeOverride("")
+		}
 	}
+	s := theme.Styles()
+	syncStyles(s)
+	m.input.FocusedStyle.Placeholder = dimStyle
+	m.input.BlurredStyle.Placeholder = dimStyle
+	m.input.FocusedStyle.Prompt = botStyle
+	m.input.BlurredStyle.Prompt = dimStyle
+	syncMarkdown(s)
 	return how
+}
+
+// loadThemes refreshes the user theme cache before an apply or picker read.
+// A bad themes directory never blocks the TUI: built-ins remain available and
+// the error is visible in the transcript.
+func (m *model) loadThemes() {
+	if _, err := theme.Load(); err != nil {
+		m.append(errStyle.Render("theme load failed: " + err.Error()))
+	}
 }
 
 // setEffort changes the reasoning effort and stores it both ways: as the new
@@ -1274,128 +1392,23 @@ func cwd() string {
 	return "?"
 }
 
-// detectColorScheme figures out whether the terminal background is light and
-// calls SetLightTheme so markdown renders with a matching (high-contrast)
-// glamour style. Priority:
-//  1. WHIP_THEME=light|dark (explicit env override)
-//  2. COLORFGBG (set by many terminals; last field is the bg color index)
-//  3. an OSC 11 background query on /dev/tty with a short timeout
-//  4. default: dark (the safe assumption for coding terminals)
-//
-// The config theme is NOT consulted here — applyTheme handles explicit picks
-// before auto ever reaches detection. detectColorScheme returns a short
-// human-readable note naming the source of the decision (shown by /theme auto
-// so a wrong pick is diagnosable).
-//
-// tuiRunning and bgCache are declared above Run (see the note there).
+// bgResult caches the pre-Bubble Tea terminal probe. It is only read and
+// written by the main goroutine: once before p.Run, then from the update loop.
 type bgResult struct{ light, valid bool }
 
-// inTmuxEnv reports whether whip runs inside tmux/screen, where the terminal
-// can't be queried directly.
 func inTmuxEnv() bool {
 	return os.Getenv("TMUX") != "" ||
 		strings.HasPrefix(os.Getenv("TERM"), "screen") ||
 		strings.HasPrefix(os.Getenv("TERM"), "tmux")
 }
 
-func detectColorScheme() string {
-	setScheme := func(light bool) {
-		SetLightTheme(light)                  // glamour markdown style
-		lipgloss.SetHasDarkBackground(!light) // AdaptiveColor picks
-	}
-	switch strings.ToLower(os.Getenv("WHIP_THEME")) {
-	case "light":
-		setScheme(true)
-		return "WHIP_THEME"
-	case "dark":
-		setScheme(false)
-		return "WHIP_THEME"
-	}
-	// While bubbletea runs, the terminal is OFF LIMITS: the raw-mode OSC 11
-	// query flips the shared tty to VMIN=0/VTIME, and if bubbletea's input
-	// reader issues a read in that window it gets a 0-byte result = io.EOF —
-	// the reader exits SILENTLY and the session never sees input again (the
-	// frozen-whip bug: /theme auto or a config-watcher sync re-ran detection
-	// mid-session). Reuse the startup query's answer instead; env fallbacks
-	// below are read-only and stay available.
-	if tuiRunning {
-		if bgCache.valid {
-			setScheme(bgCache.light)
-			return "terminal query (cached from startup)"
-		}
-		light, ok, how := fallbackScheme(inTmuxEnv(), os.Getenv("COLORFGBG"))
-		if ok {
-			setScheme(light)
-		} else {
-			SetUnknownTheme()
-		}
-		return how
-	}
-	// Query the terminal directly whenever we have one — the OSC 11 reply is
-	// the terminal's REAL background, so it outranks COLORFGBG (which can be
-	// stale: inherited from an outer shell/terminal with a different bg).
-	// termenv's query refuses to run inside tmux/screen (its termStatusReport
-	// short-circuits on TERM=screen*/tmux*) and silently assumes a dark
-	// background — wrong for a tmux user on a light terminal. queryTerminal-
-	// Background reaches the REAL terminal via DCS passthrough inside tmux, and
-	// via a plain OSC 11 query otherwise, so use it first and keep termenv only
-	// as a fallback for terminals it can query directly.
-	inTmux := inTmuxEnv()
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err == nil {
-		if light, ok := queryTerminalBackground(tty, inTmux); ok {
-			_ = tty.Close()
-			setScheme(light)
-			bgCache = bgResult{light: light, valid: true}
-			if inTmux {
-				return "terminal query (inside tmux)"
-			}
-			return "terminal query"
-		}
-		// fallback: termenv's own query — but NEVER inside tmux/screen, where
-		// termenv can't reach the real terminal (its termStatusReport
-		// short-circuits on TERM=screen*/tmux*) and silently ASSUMES DARK.
-		// That guess rendered the dark palette on light terminals (washed-out
-		// gray text on white) whenever the tmux query got no reply.
-		if !inTmux {
-			type result struct{ light bool }
-			done := make(chan result, 1)
-			go func() {
-				o := termenv.NewOutput(tty)
-				done <- result{light: !o.HasDarkBackground()}
-			}()
-			select {
-			case r := <-done:
-				_ = tty.Close()
-				setScheme(r.light)
-				bgCache = bgResult{light: r.light, valid: true}
-				return "terminal query"
-			case <-time.After(300 * time.Millisecond):
-			}
-		}
-		_ = tty.Close()
-	}
-	light, ok, how := fallbackScheme(inTmux, os.Getenv("COLORFGBG"))
-	if ok {
-		setScheme(light)
-	} else {
-		// No reliable signal: don't force a dark guess. Neutral default keeps
-		// text at the terminal's own colors instead of inverting contrast.
-		SetUnknownTheme()
-	}
-	return how
-}
-
-// fallbackScheme decides the color scheme when no terminal query succeeded:
-// COLORFGBG (set by many terminals; last field is the bg color index) when
-// parseable, otherwise not-ok — the caller falls back to the neutral theme.
-// Pure so the no-query-reply behavior is unit-testable: inside tmux the ONLY
-// acceptable outcomes are COLORFGBG or neutral, never a dark assumption.
+// fallbackScheme reads COLORFGBG after an unsuccessful query. In tmux, no
+// signal remains neutral rather than assuming dark because termenv cannot
+// reliably query the outer terminal there.
 func fallbackScheme(inTmux bool, colorfgbg string) (light, ok bool, how string) {
 	if i := strings.LastIndex(colorfgbg, ";"); i >= 0 {
 		var bg int
 		if _, err := fmt.Sscanf(colorfgbg[i+1:], "%d", &bg); err == nil {
-			// standard palette: 0-6 dark, 7+ light (15 = white)
 			return bg == 7 || bg >= 8, true, "COLORFGBG (query failed)"
 		}
 	}
@@ -1403,6 +1416,20 @@ func fallbackScheme(inTmux bool, colorfgbg string) (light, ok bool, how string) 
 		return false, false, "undetermined (no OSC 11 reply through tmux — outer terminal doesn't answer it (e.g. mosh), or tmux <3.4 without `allow-passthrough on`) — neutral default"
 	}
 	return false, false, "undetermined (query timed out) — neutral default"
+}
+
+// detectColorScheme applies the detected terminal background to the legacy
+// markdown renderer and returns the source for diagnostics. Theme application
+// itself uses applyTheme; this remains a small testable compatibility wrapper.
+func detectColorScheme() string {
+	bg, determined, source := probeBackground()
+	if !determined {
+		SetUnknownTheme()
+		return source
+	}
+	SetLightTheme(bg == theme.BgLight)
+	lipgloss.SetHasDarkBackground(bg == theme.BgDark)
+	return source
 }
 
 // inputContentHeight returns the number of lines the input needs to show its
@@ -3347,11 +3374,12 @@ func (m *model) command(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "/theme":
 		if len(fields) > 1 {
-			switch fields[1] {
-			case "light", "dark", "auto":
-				m.setTheme(fields[1])
-			default:
-				m.append(errStyle.Render("usage: /theme light|dark|auto"))
+			m.loadThemes()
+			name := strings.ToLower(fields[1])
+			if _, ok := theme.Find(theme.All(), name); ok {
+				m.setTheme(name)
+			} else {
+				m.append(errStyle.Render("usage: /theme light|dark|auto|<name>"))
 			}
 		} else {
 			m.openPaletteOn("theme") // bare: open the switcher, don't toggle blind

@@ -149,7 +149,7 @@ type Config struct {
 	CompactModel    string              `json:"compactModel,omitempty"`    // model for compaction summaries; "" = the built-in default
 	CompactProvider string              `json:"compactProvider,omitempty"` // provider for the compaction model; "" = the model's default routing
 	CompactPct      int                 `json:"compactPct,omitempty"`      // compact at this % of the context window; 0 = DefaultCompactPct
-	Theme           string              `json:"theme,omitempty"`           // "light", "dark", or "" (auto-detect at startup)
+	Theme           string              `json:"theme,omitempty"`           // "light", "dark", "" (auto), or a ~/.whip/themes name
 	Mouse           *bool               `json:"mouse,omitempty"`           // false disables capture so native terminal selection works
 	Thinking        *bool               `json:"thinking,omitempty"`        // nil defaults to on; false hides reasoning tokens (ctrl+o)
 	CollapsePaste   *bool               `json:"collapsePaste,omitempty"`   // nil/false: pastes land verbatim; true collapses ≥3-line pastes into a [Pasted ~N lines] placeholder
