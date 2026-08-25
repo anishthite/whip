@@ -2,6 +2,7 @@ package tui
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/context-labs/whip/internal/config"
@@ -34,6 +35,9 @@ func TestTrustGatePromptDisabled(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatal("decline should explain the prompt is disabled")
+	}
+	if !strings.Contains(err.Error(), "~/.whip/config.json") {
+		t.Fatalf("decline should point to the whip config: %v", err)
 	}
 }
 
