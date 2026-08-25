@@ -225,6 +225,10 @@ compaction path must see immediately) are never retried. Each retry posts a
   see the `ponytail` note in `shell.go`.
   Tests: `shell_test.go` (output/message routing idle+busy, queue-drain,
   truncation, echo rules, cd/pwd incl. `~` and bad dirs).
+- **Terminal window title.** While whip runs it sets the terminal's window/
+  tab title to `whip <cwd>` (pi shows `pi <cwd>`), and re-emits the title after
+  a successful `/cd` so the directory stays current. The shell reclaims the
+  title at its next prompt after whip exits, so no restore sequence is needed.
 - **`/goal-from-context [n]`** distills the last *n* conversation messages
   (default 8, clamped to the available history) into a detailed goal — a
   concrete outcome line plus a bullet list of checkable completion criteria —
