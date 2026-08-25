@@ -896,6 +896,9 @@ func buildAgent(cfg *config.Config, modelName, provName, sysPrompt string) (*age
 	} else {
 		tools.ScreenshotSink = nil
 	}
+	if cfg.Experimental["hashlineEdit"] {
+		ag.UseHashlineTools()
+	}
 	return ag, modelName, provName, nil
 }
 
