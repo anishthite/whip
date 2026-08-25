@@ -61,6 +61,7 @@ func (m *model) applyCfgSync(msg cfgSyncMsg) {
 	}
 	if msg.theme != m.cfg.Theme {
 		m.cfg.Theme = msg.theme
+		m.loadThemes()
 		m.applyTheme(msg.theme)
 		m.refreshVP() // repaint under the new scheme without a terminal resize
 	}

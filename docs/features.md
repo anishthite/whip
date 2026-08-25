@@ -208,6 +208,15 @@ credentials are accepted only for `https://chatgpt.com/backend-api`. Tests:
   rewiring incl. wrap-split links, end-to-end renderMarkdown, user echo).
 - **Command palette** (ctrl+p) with sub-panels for model/effort/goal/compaction
   and ←/→ steppers for the compaction level — `palette.go`.
+- **JSON themes.** Drop `~/.whip/themes/<name>.json` (or
+  `$WHIP_HOME/themes/<name>.json`) with `background` (`dark`/`light`/`auto`)
+  and six optional color roles (`you`, `bot`, `tool`, `dim`, `error`,
+  `thinking`); set `"theme": "<name>"` in `config.json` or pick it via
+  `/theme`/ctrl+p. `internal/theme` loads JSONC files, keeps `auto`/`light`/
+  `dark` as built-ins, and `tui.go` maps the resolved `StyleSet` onto the six
+  transcript styles without changing persisted session data. Tests:
+  `internal/theme/theme_test.go`, `theme_cmd_test.go`, existing markdown/theme
+  contrast tests.
 - **Mouse**: `/mouse` toggles capture; with capture off the terminal's native
   selection works, with it on shift-drag selects. `"mouse": false` in config
   disables capture at startup.
