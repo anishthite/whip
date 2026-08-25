@@ -89,6 +89,16 @@ explicitly. OAuth credentials are only sent to
 Drop a `.mcp.json` in your repo and MCP servers just appear (`/mcp` to see
 them). ctrl+c once interrupts; twice quits.
 
+## Tokens per second
+
+While a completion streams, the status line shows an estimated tokens-per-second
+gauge. It defaults to a compact tachometer; set `"tpsGauge"` to `"bar"`,
+`"tach"`, `"spark"`, `"lights"`, or `"off"` to choose its style. Preview the
+gauge with `go run ./cmd/tps-demo -snap`, or omit `-snap` for the interactive
+lab.
+
+![TPS gauge demo](docs/assets/tps-demo.gif)
+
 ## Themes
 
 Set `"theme": "dark"`, `"light"`, or a custom theme name in

@@ -24,7 +24,7 @@ func TestTrustGate(t *testing.T) {
 // With the prompt disabled, an untrusted cwd declines without asking and
 // reports why.
 func TestTrustGatePromptDisabled(t *testing.T) {
-	t.Setenv("LOOPY_HOME", t.TempDir())
+	t.Setenv("WHIP_HOME", t.TempDir())
 	if err := config.DisableTrustPrompt(); err != nil {
 		t.Fatal(err)
 	}

@@ -25,7 +25,7 @@ func checkTrust() (bool, error) {
 		return true, nil
 	}
 	if config.TrustPromptDisabled() {
-		return false, fmt.Errorf("folder %s is not trusted (trust prompt disabled; set \"noTrustPrompt\": false in ~/.loopy/config.json to re-enable)", wd)
+		return false, fmt.Errorf("folder %s is not trusted (trust prompt disabled; set \"noTrustPrompt\": false in ~/.whip/config.json to re-enable)", wd)
 	}
 	st, err := os.Stdin.Stat()
 	if err != nil || st.Mode()&os.ModeCharDevice == 0 {
@@ -53,7 +53,7 @@ func checkTrust() (bool, error) {
 		if err := config.DisableTrustPrompt(); err != nil {
 			return false, err
 		}
-		return false, fmt.Errorf("trust prompt disabled; won't ask again (set \"noTrustPrompt\": false in ~/.loopy/config.json to undo)")
+		return false, fmt.Errorf("trust prompt disabled; won't ask again (set \"noTrustPrompt\": false in ~/.whip/config.json to undo)")
 	}
 	return false, nil
 }

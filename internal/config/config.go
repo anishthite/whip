@@ -114,6 +114,7 @@ type Config struct {
 	Mouse           *bool               `json:"mouse,omitempty"`           // false disables capture so native terminal selection works
 	Thinking        *bool               `json:"thinking,omitempty"`        // nil defaults to on; false hides reasoning tokens (ctrl+o)
 	GoalMaxRounds   int                 `json:"goalMaxRounds,omitempty"`   // global goal-loop round cap; 0 = DefaultGoalMaxRounds; projects.json may override per folder
+	TPSGauge        string              `json:"tpsGauge,omitempty"`        // status-line tokens/sec gauge: "bar", "tach", "spark", "lights", or "off"; omitted defaults to tach
 	MaxRetries      int                 `json:"maxRetries,omitempty"`      // attempts per provider request on transient failures (429/5xx/network); 0 = llm.DefaultMaxAttempts, 1 = no retries
 	Providers       map[string]Provider `json:"providers"`
 	Models          map[string]Model    `json:"models"`
