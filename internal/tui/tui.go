@@ -23,6 +23,7 @@ import (
 
 	"github.com/context-labs/whip/internal/agent"
 	"github.com/context-labs/whip/internal/browser"
+	"github.com/context-labs/whip/internal/codexauth"
 	"github.com/context-labs/whip/internal/computer"
 	"github.com/context-labs/whip/internal/config"
 	"github.com/context-labs/whip/internal/llm"
@@ -496,6 +497,13 @@ func (m *model) fetchCatalogs(force bool) {
 	}
 	dirty := false
 	for name, prov := range m.cfg.Providers {
+		if prov.API == "openai-codex-responses" {
+			if _, ok := cats[name]; ok {
+				delete(cats, name)
+				dirty = true
+			}
+			continue // configured limits are authoritative; Codex has no /models API
+		}
 		if c, ok := cats[name]; ok && !force && !c.Stale() && c.BaseURL == prov.BaseURL {
 			continue
 		}
@@ -831,9 +839,9 @@ func buildAgent(cfg *config.Config, modelName, provName, sysPrompt string) (*age
 			provName = mdl.Providers[0]
 		}
 	}
-	key := prov.Key()
-	if key == "" {
-		return nil, "", "", fmt.Errorf("no API key for provider %q (set apiKey/apiKeyEnv in ~/.whip/config.json)", provName)
+	client, err := clientForProvider(prov, provName, cfg.MaxRetries)
+	if err != nil {
+		return nil, "", "", err
 	}
 	// Two distinct limits:
 	//   - ContextLimit: the input window (provider's context_length, else the
@@ -841,6 +849,9 @@ func buildAgent(cfg *config.Config, modelName, provName, sysPrompt string) (*age
 	//   - MaxTokens: the OUTPUT cap sent as max_tokens. Priority: config maxOut
 	//     → provider's max_completion_tokens → config context (last resort).
 	cat, hasCat := config.LoadCatalogs()[provName]
+	if prov.API == "openai-codex-responses" {
+		hasCat = false
+	}
 	ctxLimit := mdl.ContextWindow()
 	if hasCat {
 		if n := cat.ContextLength(apiID); n > 0 {
@@ -854,8 +865,6 @@ func buildAgent(cfg *config.Config, modelName, provName, sysPrompt string) (*age
 	if maxOut <= 0 {
 		maxOut = ctxLimit // generous default; provider clamps if it's too high
 	}
-	client := llm.New(prov.BaseURL, key)
-	client.MaxRetries = cfg.MaxRetries
 	ag := agent.New(client, apiID, maxOut, sysPrompt)
 	ag.ModelName, ag.Provider = modelName, provName
 	ag.ContextLimit = ctxLimit
@@ -2228,6 +2237,9 @@ func (m *model) cursorOnLastLine() bool {
 // contextLimitFor returns the advertised context window for a model id on a
 // provider, from the cached /models catalog (0 when unknown).
 func (m *model) contextLimitFor(provName, apiID string) int {
+	if m.cfg != nil && m.cfg.Providers[provName].API == "openai-codex-responses" {
+		return 0
+	}
 	if cat, ok := m.catalogs[provName]; ok {
 		return cat.ContextLength(apiID)
 	}
@@ -2238,6 +2250,9 @@ func (m *model) contextLimitFor(provName, apiID string) int {
 // model's advertised rates; ok is false when the provider's catalog has no
 // pricing for the model, in which case the status line hides the segment.
 func (m *model) sessionCost() (float64, bool) {
+	if m.cfg != nil && m.cfg.Providers[m.provName].API == "openai-codex-responses" {
+		return 0, false
+	}
 	cat, ok := m.catalogs[m.provName]
 	if !ok {
 		return 0, false
@@ -2278,12 +2293,39 @@ func (m *model) applyCompactModel() {
 		}
 		return
 	}
-	if key := prov.Key(); key != "" {
-		m.agent.CompactClient = llm.New(prov.BaseURL, key)
-		m.agent.CompactClient.MaxRetries = m.cfg.MaxRetries
+	client, err := clientForProvider(prov, m.compactProv, m.cfg.MaxRetries)
+	if err == nil {
+		m.agent.CompactClient = client
 		m.agent.CompactModel = apiID
 	} else if m.compactModel != "" {
-		m.append(errStyle.Render("compaction model: no API key — using current model"))
+		m.append(errStyle.Render("compaction model: " + err.Error() + " — using current model"))
+	}
+}
+
+func clientForProvider(prov config.Provider, name string, maxRetries int) (llm.Client, error) {
+	switch prov.API {
+	case "", "openai-completions":
+		key := prov.Key()
+		if key == "" {
+			return nil, fmt.Errorf("no API key for provider %q (set apiKey/apiKeyEnv in ~/.whip/config.json)", name)
+		}
+		client := llm.New(prov.BaseURL, key)
+		client.MaxRetries = maxRetries
+		return client, nil
+	case "openai-codex-responses":
+		if prov.Auth != "codex" {
+			return nil, fmt.Errorf("codex provider %q requires auth:\"codex\"", name)
+		}
+		if strings.TrimRight(prov.BaseURL, "/") != "https://chatgpt.com/backend-api" {
+			return nil, fmt.Errorf("codex provider %q must use https://chatgpt.com/backend-api", name)
+		}
+		source := &codexauth.Source{}
+		if err := source.Available(); err != nil {
+			return nil, err
+		}
+		return llm.NewCodex(prov.BaseURL, source), nil
+	default:
+		return nil, fmt.Errorf("unsupported API %q for provider %q", prov.API, name)
 	}
 }
 
@@ -2613,9 +2655,11 @@ func (m *model) supportsVision() bool {
 // buildAgent (which runs before the model exists) can gate the screenshot
 // sink the same way.
 func modelSupportsVision(cfg *config.Config, modelName, modelID string, catalogs map[string]config.Catalog, provName string) bool {
-	if cat, ok := catalogs[provName]; ok {
-		if vision, found := cat.SupportsVision(modelID); found {
-			return vision
+	if cfg == nil || cfg.Providers[provName].API != "openai-codex-responses" {
+		if cat, ok := catalogs[provName]; ok {
+			if vision, found := cat.SupportsVision(modelID); found {
+				return vision
+			}
 		}
 	}
 	if cfg != nil {

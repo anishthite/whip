@@ -45,6 +45,38 @@ go install github.com/context-labs/whip/cmd/whip@latest
 Then `whip` and you're in. Defaults to inference.net models — any
 OpenAI-compatible endpoint works as a provider.
 
+## Codex subscription
+
+Whip can use an existing ChatGPT/Codex subscription instead of an API key.
+First sign in with `pi /login openai-codex` or `codex login`, then configure
+the provider explicitly:
+
+```json
+{
+  "providers": {
+    "codex": {
+      "name": "Codex",
+      "baseUrl": "https://chatgpt.com/backend-api",
+      "api": "openai-codex-responses",
+      "auth": "codex"
+    }
+  },
+  "models": {
+    "gpt-5.4": {
+      "providers": ["codex"],
+      "context": 272000,
+      "maxOut": 128000
+    }
+  }
+}
+```
+
+Whip prefers Pi's local auth file and falls back to Codex CLI auth. Expiring
+tokens refresh locally and are never printed or added to conversations. This
+provider has no compatible model catalog, so set `context` and `maxOut`
+explicitly. OAuth credentials are only sent to
+`https://chatgpt.com/backend-api`.
+
 ## First things to try
 
 ```
