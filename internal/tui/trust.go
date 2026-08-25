@@ -13,9 +13,9 @@ import (
 // trusted (~/.whip/trusted.json), it returns immediately. Otherwise it asks
 // on the terminal (plain stdin/stdout — this runs before the TUI starts):
 // "Yes, proceed" records the path; "No, exit" declines; "Never show again"
-// sets noTrustPrompt in config.json so the dialog never appears (untrusted
-// folders then decline without asking). When stdin isn't a terminal (piped
-// run, tests), we can't ask — decline safely.
+// records the path and sets noTrustPrompt in config.json so the dialog never
+// appears for future folders (which then decline without asking). When stdin
+// isn't a terminal (piped run, tests), we can't ask — decline safely.
 func checkTrust() (bool, error) {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -43,17 +43,24 @@ func checkTrust() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	switch strings.TrimSpace(ans) {
+	return trustChoice(wd, strings.TrimSpace(ans))
+}
+
+func trustChoice(wd, answer string) (bool, error) {
+	switch answer {
 	case "1":
 		if err := config.Trust(wd); err != nil {
 			return false, err
 		}
 		return true, nil
 	case "3":
+		if err := config.Trust(wd); err != nil {
+			return false, err
+		}
 		if err := config.DisableTrustPrompt(); err != nil {
 			return false, err
 		}
-		return false, fmt.Errorf("trust prompt disabled; won't ask again (set \"noTrustPrompt\": false in ~/.loopy/config.json to undo)")
+		return true, nil
 	}
 	return false, nil
 }

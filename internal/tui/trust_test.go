@@ -24,7 +24,7 @@ func TestTrustGate(t *testing.T) {
 // With the prompt disabled, an untrusted cwd declines without asking and
 // reports why.
 func TestTrustGatePromptDisabled(t *testing.T) {
-	t.Setenv("LOOPY_HOME", t.TempDir())
+	t.Setenv("WHIP_HOME", t.TempDir())
 	if err := config.DisableTrustPrompt(); err != nil {
 		t.Fatal(err)
 	}
@@ -34,5 +34,21 @@ func TestTrustGatePromptDisabled(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatal("decline should explain the prompt is disabled")
+	}
+}
+
+func TestTrustChoiceNeverShowAgain(t *testing.T) {
+	t.Setenv("WHIP_HOME", t.TempDir())
+	dir := t.TempDir()
+
+	ok, err := trustChoice(dir, "3")
+	if err != nil || !ok {
+		t.Fatalf("never show again should trust and continue: %v %v", ok, err)
+	}
+	if !config.Trusted(dir) {
+		t.Fatal("never show again should trust the current folder")
+	}
+	if !config.TrustPromptDisabled() {
+		t.Fatal("never show again should disable future trust prompts")
 	}
 }
