@@ -12,8 +12,10 @@ import (
 // checkTrust gates startup on the folder-trust dialog. If the cwd is already
 // trusted (~/.whip/trusted.json), it returns immediately. Otherwise it asks
 // on the terminal (plain stdin/stdout — this runs before the TUI starts):
-// "Yes, proceed" records the path; anything else declines. When stdin isn't
-// a terminal (piped run, tests), we can't ask — decline safely.
+// "Yes, proceed" records the path; "No, exit" declines; "Never show again"
+// sets noTrustPrompt in config.json so the dialog never appears (untrusted
+// folders then decline without asking). When stdin isn't a terminal (piped
+// run, tests), we can't ask — decline safely.
 func checkTrust() (bool, error) {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -21,6 +23,9 @@ func checkTrust() (bool, error) {
 	}
 	if config.Trusted(wd) {
 		return true, nil
+	}
+	if config.TrustPromptDisabled() {
+		return false, fmt.Errorf("folder %s is not trusted (trust prompt disabled; set \"noTrustPrompt\": false in ~/.loopy/config.json to re-enable)", wd)
 	}
 	st, err := os.Stdin.Stat()
 	if err != nil || st.Mode()&os.ModeCharDevice == 0 {
@@ -32,17 +37,23 @@ func checkTrust() (bool, error) {
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "With your permission whip may execute files in this folder. Executing untrusted code is unsafe.")
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprint(os.Stderr, "  1. Yes, proceed\n  2. No, exit\n\n❯ ")
+	fmt.Fprint(os.Stderr, "  1. Yes, proceed\n  2. No, exit\n  3. Never show again\n\n❯ ")
 	r := bufio.NewReader(os.Stdin)
 	ans, err := r.ReadString('\n')
 	if err != nil {
 		return false, err
 	}
-	if strings.TrimSpace(ans) == "1" {
+	switch strings.TrimSpace(ans) {
+	case "1":
 		if err := config.Trust(wd); err != nil {
 			return false, err
 		}
 		return true, nil
+	case "3":
+		if err := config.DisableTrustPrompt(); err != nil {
+			return false, err
+		}
+		return false, fmt.Errorf("trust prompt disabled; won't ask again (set \"noTrustPrompt\": false in ~/.loopy/config.json to undo)")
 	}
 	return false, nil
 }
