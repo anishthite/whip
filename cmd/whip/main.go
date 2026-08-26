@@ -63,7 +63,7 @@ func main() {
 		return
 	}
 
-	// `whip login codex` — compatible alias for `whip auth codex`.
+	// `whip login codex|claude` — compatible aliases for subscription auth.
 	if flag.NArg() > 0 && flag.Arg(0) == "login" {
 		if err := loginCLI(flag.Args()[1:]); err != nil {
 			fmt.Fprintln(os.Stderr, "whip:", err)

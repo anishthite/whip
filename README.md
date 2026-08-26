@@ -71,6 +71,19 @@ come from the backend rather than a hard-coded list. `gpt-5.4 @ codex` remains
 as a compatible fallback route. OAuth credentials are only sent to
 `https://chatgpt.com/backend-api`.
 
+## Claude Code subscription
+
+Whip can also use a Claude Pro or Max subscription. Run `whip auth claude`
+(or `whip login claude`) and open the browser URL it prints; `/auth claude`
+does the same inside an active session. Whip stores its refreshable OAuth state
+in `~/.whip/claude.json` and can reuse Pi's Anthropic OAuth state as a
+fallback. It never changes Claude Code's own credential store or keychain.
+
+The ready route is `claude-sonnet-4-6 @ claude`. Claude subscription requests
+use the Anthropic Messages protocol and Claude Code's OAuth identity headers,
+so Whip's existing tool loop owns tool execution while the request shape
+matches Pi Coding Agent.
+
 ## First things to try
 
 ```

@@ -25,8 +25,8 @@ type registryEntry struct {
 var registry = []registryEntry{
 	{
 		Name: "/auth",
-		Hint: "openrouter [key] | codex — authenticate a provider; " +
-			"Codex opens device login and immediately adds account models to /model",
+		Hint: "openrouter [key] | codex | claude — authenticate a provider; " +
+			"subscriptions add a ready route to /model",
 		Category: "Agent",
 	},
 	{Name: "/cd", Hint: "[dir] — change working directory (bare prints it)", Category: "Session"},

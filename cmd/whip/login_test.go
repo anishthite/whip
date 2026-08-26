@@ -79,7 +79,7 @@ func TestLoginCodexShowsDeviceInstructions(t *testing.T) {
 }
 
 func TestLoginCLIUsage(t *testing.T) {
-	if err := loginCLI([]string{"openai"}); err == nil || err.Error() != "usage: whip login codex" {
+	if err := loginCLI([]string{"openai"}); err == nil || err.Error() != "usage: whip login <codex|claude>" {
 		t.Fatalf("error = %v", err)
 	}
 }

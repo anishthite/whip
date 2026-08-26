@@ -23,6 +23,7 @@ import (
 
 	"github.com/context-labs/whip/internal/agent"
 	"github.com/context-labs/whip/internal/browser"
+	"github.com/context-labs/whip/internal/claudeauth"
 	"github.com/context-labs/whip/internal/codexauth"
 	"github.com/context-labs/whip/internal/computer"
 	"github.com/context-labs/whip/internal/config"
@@ -1759,6 +1760,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case codexLoginResultMsg:
 		m.applyCodexLoginResult(msg)
 		return m, nil
+	case claudeLoginResultMsg:
+		m.applyClaudeLoginResult(msg)
+		return m, nil
 
 	case noticeMsg:
 		m.append(dimStyle.Render(string(msg)))
@@ -2478,6 +2482,18 @@ func clientForProvider(prov config.Provider, name string, maxRetries int) (llm.C
 			return nil, err
 		}
 		return llm.NewCodex(prov.BaseURL, source), nil
+	case "anthropic-messages":
+		if prov.Auth != "claude" {
+			return nil, fmt.Errorf("Claude provider %q requires auth:\"claude\"", name)
+		}
+		if strings.TrimRight(prov.BaseURL, "/") != config.ClaudeBaseURL {
+			return nil, fmt.Errorf("Claude provider %q must use %s", name, config.ClaudeBaseURL)
+		}
+		source := &claudeauth.Source{}
+		if err := source.Available(); err != nil {
+			return nil, err
+		}
+		return llm.NewClaude(prov.BaseURL, source), nil
 	default:
 		return nil, fmt.Errorf("unsupported API %q for provider %q", prov.API, name)
 	}

@@ -8,17 +8,25 @@ import (
 	"os"
 	"os/signal"
 
+	"github.com/context-labs/whip/internal/claudeauth"
 	"github.com/context-labs/whip/internal/codexauth"
 	"github.com/context-labs/whip/internal/config"
 	"github.com/context-labs/whip/internal/llm"
 )
 
-// loginCLI implements `whip login codex`.
+// loginCLI implements the compatible `whip login <subscription>` aliases.
 func loginCLI(args []string) error {
-	if len(args) != 1 || args[0] != "codex" {
-		return errors.New("usage: whip login codex")
+	if len(args) != 1 {
+		return errors.New("usage: whip login <codex|claude>")
 	}
-	return authCodexCLI(nil)
+	switch args[0] {
+	case "codex":
+		return authCodexCLI(nil)
+	case "claude":
+		return authClaudeCLI(nil)
+	default:
+		return errors.New("usage: whip login <codex|claude>")
+	}
 }
 
 // authCodexCLI implements `whip auth codex`; login codex delegates here so
@@ -87,4 +95,36 @@ Enter this one-time code (expires in 15 minutes):
 Continue only if you started this login in Whip. Press ctrl+c to cancel.
 
 `, code.VerificationURL, code.UserCode)
+}
+
+// authClaudeCLI implements `whip auth claude`; login claude delegates here.
+func authClaudeCLI(args []string) error {
+	if len(args) != 0 {
+		return errors.New("usage: whip auth claude")
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	return loginClaude(ctx, &claudeauth.Source{}, os.Stdout)
+}
+
+func loginClaude(ctx context.Context, source *claudeauth.Source, out io.Writer) error {
+	err := source.Login(ctx, func(loginURL string) {
+		fmt.Fprintf(out, "\nOpen this URL in a browser and sign in to Claude:\n  %s\n\nContinue only if you started this login in Whip. Press ctrl+c to cancel.\n\n", loginURL)
+	})
+	if errors.Is(err, context.Canceled) {
+		return errors.New("Claude login cancelled")
+	}
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("configure Claude provider: %w", err)
+	}
+	cfg.UpsertClaude()
+	if err := cfg.Save(); err != nil {
+		return fmt.Errorf("configure Claude provider: %w", err)
+	}
+	fmt.Fprintln(out, "Claude login saved to ~/.whip/claude.json. claude-sonnet-4-6 @ claude is ready in /model.")
+	return nil
 }

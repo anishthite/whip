@@ -44,11 +44,50 @@ func TestAuthCommandUsageAndUnknownProvider(t *testing.T) {
 	m.authCommand(nil)
 	m.authCommand([]string{"anthropic"})
 	out := m.transcriptText()
-	if !strings.Contains(out, "usage: /auth openrouter") || !strings.Contains(out, "/auth codex") {
+	if !strings.Contains(out, "usage: /auth openrouter") || !strings.Contains(out, "/auth codex") || !strings.Contains(out, "/auth claude") {
 		t.Errorf("bare /auth should print usage:\n%s", out)
 	}
 	if !strings.Contains(out, "unknown provider anthropic") {
 		t.Errorf("unknown provider should be rejected:\n%s", out)
+	}
+}
+
+func TestClaudeLoginResultConfiguresAndMakesModelPickable(t *testing.T) {
+	m := authTestModel(t)
+	m.busy = true
+	m.cancel = func() {}
+	m.applyClaudeLoginResult(claudeLoginResultMsg{})
+
+	if m.busy || m.cancel != nil {
+		t.Fatal("completed Claude login should clear its busy state")
+	}
+	p, ok := m.cfg.Providers[config.ClaudeProviderName]
+	if !ok || p.Auth != "claude" {
+		t.Fatalf("Claude provider was not configured: %+v", p)
+	}
+	m.openModelPicker()
+	found := false
+	for _, item := range m.mpicker.items {
+		if item.model == config.ClaudeDefaultModel && item.provider == config.ClaudeProviderName {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("%s @ %s missing from picker: %+v", config.ClaudeDefaultModel, config.ClaudeProviderName, m.mpicker.items)
+	}
+	if out := m.transcriptText(); !strings.Contains(out, "Claude configured") {
+		t.Errorf("success should be reported:\n%s", out)
+	}
+}
+
+func TestClaudeLoginResultFailureLeavesRouteUntouched(t *testing.T) {
+	m := authTestModel(t)
+	m.applyClaudeLoginResult(claudeLoginResultMsg{err: errors.New("login rejected")})
+	if _, ok := m.cfg.Providers[config.ClaudeProviderName]; ok {
+		t.Fatal("failed Claude login must not configure a provider")
+	}
+	if out := m.transcriptText(); !strings.Contains(out, "Claude login failed") {
+		t.Errorf("failure should be reported:\n%s", out)
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 //
 //	whip auth openrouter [--env] [<key>]
 //	whip auth codex
+//	whip auth claude
 //
 // The key comes from (first hit): the positional arg, OPENROUTER_API_KEY in
 // the environment, or a masked prompt. It is validated against the live
@@ -34,15 +35,17 @@ import (
 // interactive terminal we offer to append the export to the shell rc file.
 func authCLI(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: whip auth <provider> [<key>]   (providers: openrouter, codex)")
+		return errors.New("usage: whip auth <provider> [<key>]   (providers: openrouter, codex, claude)")
 	}
 	switch args[0] {
 	case "openrouter":
 		return authOpenRouterCLI(args[1:])
 	case "codex":
 		return authCodexCLI(args[1:])
+	case "claude":
+		return authClaudeCLI(args[1:])
 	default:
-		return fmt.Errorf("unknown provider %q (supported: openrouter, codex)", args[0])
+		return fmt.Errorf("unknown provider %q (supported: openrouter, codex, claude)", args[0])
 	}
 }
 

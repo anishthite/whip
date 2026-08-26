@@ -190,6 +190,27 @@ only for `https://chatgpt.com/backend-api`. Tests: `codexauth/auth_test.go`,
 `cmd/whip/login_test.go`, `llm/codex_test.go`, and `tui/model_cmd_test.go`
 (`TestBuildAgentCodexAuth*`).
 
+### Claude Code subscription provider
+
+`"api": "anthropic-messages", "auth": "claude"` routes a configured model
+through Anthropic Messages with Claude Pro/Max OAuth. `whip auth claude` (and
+the compatible `whip login claude`) starts Pi's browser PKCE flow with a
+localhost callback; `/auth claude` runs the same cancellable flow inside the
+TUI. The successful login is written atomically to Whip's own
+`~/.whip/claude.json`, preserving Claude Code's credential store and keychain;
+an existing Pi Anthropic OAuth entry remains a fallback. `UpsertClaude` makes
+`claude-sonnet-4-6 @ claude` selectable without changing the user's default
+route.
+
+`internal/llm/claude.go` maps Whip messages, images, tools/results, streaming
+text/thinking, and usage to Anthropic Messages. It applies Pi's Claude Code
+OAuth identity headers and canonicalizes matching built-in tool names at the
+wire boundary, then maps them back before Whip's agent loop executes them.
+Anthropic has no subscription model catalog, so the fixed fallback is the
+ready-to-use route and users may add explicit routes for other entitled
+models. Tests: `claudeauth/auth_test.go`, `llm/claude_test.go`,
+`config/claude_test.go`, and `tui/auth_cmd_test.go`.
+
 `cmd/whip/auth.go`, `internal/config/openrouter.go`, `internal/config/codex.go`,
 `internal/tui/auth_cmd.go` — one-command provider onboarding. `whip auth openrouter [--env] [<key>]` takes
 the key from arg / `OPENROUTER_API_KEY` / a masked prompt, **validates it

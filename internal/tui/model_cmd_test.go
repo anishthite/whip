@@ -103,6 +103,56 @@ func TestBuildAgentCodexRejectsCustomEndpoint(t *testing.T) {
 	}
 }
 
+func TestBuildAgentClaudeAuthNeedsNoAPIKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".whip", "claude.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"access":"access","refresh":"refresh","expires":4102444800}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		DefaultModel: config.ClaudeDefaultModel,
+		Providers: map[string]config.Provider{
+			config.ClaudeProviderName: {
+				API:     "anthropic-messages",
+				Auth:    "claude",
+				BaseURL: config.ClaudeBaseURL,
+			},
+		},
+		Models: map[string]config.Model{
+			config.ClaudeDefaultModel: {Providers: []string{config.ClaudeProviderName}, Context: config.ClaudeDefaultContext, MaxOut: config.ClaudeDefaultMaxOut},
+		},
+	}
+	ag, _, _, err := buildAgent(cfg, "", "", "system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ag.Client.(*llm.Claude); !ok {
+		t.Fatalf("client = %T, want *llm.Claude", ag.Client)
+	}
+	if ag.MaxTokens != config.ClaudeDefaultMaxOut || ag.ContextLimit != config.ClaudeDefaultContext {
+		t.Fatalf("limits = max %d context %d", ag.MaxTokens, ag.ContextLimit)
+	}
+}
+
+func TestBuildAgentClaudeAuthGivesLoginHint(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{
+		DefaultModel: config.ClaudeDefaultModel,
+		Providers: map[string]config.Provider{
+			config.ClaudeProviderName: {API: "anthropic-messages", Auth: "claude", BaseURL: config.ClaudeBaseURL},
+		},
+		Models: map[string]config.Model{config.ClaudeDefaultModel: {Providers: []string{config.ClaudeProviderName}}},
+	}
+	_, _, _, err := buildAgent(cfg, "", "", "system")
+	if err == nil || !strings.Contains(err.Error(), "whip auth claude") {
+		t.Fatalf("error = %v, want login hint", err)
+	}
+}
+
 func TestBuildAgentSurfacesUnresolvedSecret(t *testing.T) {
 	cfg := &config.Config{
 		DefaultModel: "test",

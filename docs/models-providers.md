@@ -112,6 +112,21 @@ the public Responses API accepting that field, the ChatGPT subscription
 endpoint rejects it. The backend enforces the output limit for the selected
 subscription model.
 
+## Claude Code subscription: Claude Pro/Max OAuth
+
+`whip auth claude` (or `whip login claude`) opens a browser PKCE login for a
+Claude Pro or Max subscription. `/auth claude` is the in-session equivalent.
+Whip stores the refreshable result in `~/.whip/claude.json`, with Pi's
+`~/.pi/agent/auth.json` Anthropic OAuth entry as a fallback. It deliberately
+does not read or modify Claude Code's own credential store or OS keychain.
+
+The ready route is `claude-sonnet-4-6 @ claude`, and uses the Anthropic
+Messages transport. OAuth requests carry Pi's Claude Code compatibility
+identity (the Claude Code beta headers, CLI user agent, canonical built-in tool
+names, and system identity); Whip still executes tool calls in its own agent
+loop. Anthropic does not expose an account-scoped subscription model catalog,
+so add an explicit route in `config.json` to use a different entitled model.
+
 ## Token bookkeeping
 
 Three numbers with distinct meanings:

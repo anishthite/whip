@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/context-labs/whip/internal/claudeauth"
 	"github.com/context-labs/whip/internal/codexauth"
 	"github.com/context-labs/whip/internal/config"
 	"github.com/context-labs/whip/internal/llm"
@@ -14,9 +15,8 @@ import (
 
 // /auth <provider> starts the provider's login flow without leaving the
 // session. OpenRouter validates a pasted API key and pre-fetches its catalog;
-// Codex runs device-code OAuth and fetches its account-scoped catalog. Both
-// save the provider entry before reporting success, so /model can use it at
-// once.
+// Codex and Claude run their subscription OAuth flows. Each saves its provider
+// route before reporting success, so /model can use it at once.
 //
 // The bare form (/auth openrouter) repurposes the input box as a masked
 // one-shot prompt — the same namePrompt machinery as /fork and /rename, with
@@ -25,8 +25,8 @@ import (
 func (m *model) authCommand(args []string) {
 	if len(args) == 0 {
 		m.append(dimStyle.Render(
-			"usage: /auth openrouter [key] | /auth codex — " +
-				"OpenRouter accepts a masked key; Codex opens a device login",
+			"usage: /auth openrouter [key] | /auth codex | /auth claude — " +
+				"OpenRouter accepts a masked key; subscriptions open a browser login",
 		))
 		return
 	}
@@ -37,10 +37,16 @@ func (m *model) authCommand(args []string) {
 			return
 		}
 		m.authCodex()
+	case "claude":
+		if len(args) != 1 {
+			m.append(errStyle.Render("usage: /auth claude"))
+			return
+		}
+		m.authClaude()
 	case "openrouter":
 		m.authOpenRouterCommand(args[1:])
 	default:
-		m.append(errStyle.Render("unknown provider " + args[0] + " (supported: openrouter, codex)"))
+		m.append(errStyle.Render("unknown provider " + args[0] + " (supported: openrouter, codex, claude)"))
 	}
 }
 
@@ -68,6 +74,8 @@ type codexLoginResultMsg struct {
 	catalogErr error
 	err        error
 }
+
+type claudeLoginResultMsg struct{ err error }
 
 func (m *model) authCodex() {
 	if m.busy {
@@ -132,6 +140,50 @@ func (m *model) applyCodexLoginResult(result codexLoginResultMsg) {
 		return
 	}
 	m.append(dimStyle.Render(fmt.Sprintf("✓ Codex configured — %d account models are ready in /model", len(result.models))))
+}
+
+func (m *model) authClaude() {
+	if m.busy {
+		m.append(errStyle.Render("/auth claude needs an idle session; wait for the current turn first"))
+		return
+	}
+	if m.prog == nil {
+		return // tests drive applyClaudeLoginResult directly
+	}
+
+	m.append(dimStyle.Render("starting Claude browser login…"))
+	ctx, cancel := context.WithCancel(context.Background())
+	m.busy = true
+	m.cancel = cancel
+	m.turnStart = time.Now()
+	p := m.prog
+	go func() {
+		err := (&claudeauth.Source{}).Login(ctx, func(loginURL string) {
+			p.Send(noticeMsg("Claude sign-in: open " + loginURL + ". Press esc to cancel."))
+		})
+		p.Send(claudeLoginResultMsg{err: err})
+	}()
+}
+
+func (m *model) applyClaudeLoginResult(result claudeLoginResultMsg) {
+	m.busy = false
+	m.cancel = nil
+	m.interrupt1 = false
+	m.turnStart = time.Time{}
+	if errors.Is(result.err, context.Canceled) {
+		m.append(dimStyle.Render("Claude login cancelled"))
+		return
+	}
+	if result.err != nil {
+		m.append(errStyle.Render("Claude login failed: " + result.err.Error()))
+		return
+	}
+	m.cfg.UpsertClaude()
+	if err := m.cfg.Save(); err != nil {
+		m.append(errStyle.Render("config save failed: " + err.Error()))
+		return
+	}
+	m.append(dimStyle.Render("✓ Claude configured — claude-sonnet-4-6 @ claude is ready in /model"))
 }
 
 // saveCodexCatalog makes freshly authenticated subscription models available
