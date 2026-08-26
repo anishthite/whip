@@ -18,9 +18,6 @@ var effortCands = []cand{
 // model: the provider-advertised levels if known (each prefixed by off), else
 // the defaults.
 func (m *model) effortsFor() []string {
-	if m.cfg != nil && m.cfg.Providers[m.provName].API == "openai-codex-responses" {
-		return defaultEfforts
-	}
 	if c, ok := m.catalogs[m.provName]; ok {
 		apiID := m.agent.Model
 		for _, mi := range c.Models {

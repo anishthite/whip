@@ -26,7 +26,7 @@ var registry = []registryEntry{
 	{
 		Name: "/auth",
 		Hint: "openrouter [key] | codex — authenticate a provider; " +
-			"Codex opens device login and immediately adds gpt-5.4 to /model",
+			"Codex opens device login and immediately adds account models to /model",
 		Category: "Agent",
 	},
 	{Name: "/cd", Hint: "[dir] — change working directory (bare prints it)", Category: "Session"},

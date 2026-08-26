@@ -14,8 +14,9 @@ import (
 
 // /auth <provider> starts the provider's login flow without leaving the
 // session. OpenRouter validates a pasted API key and pre-fetches its catalog;
-// Codex runs device-code OAuth then registers its fixed model route. Both save
-// the provider entry before reporting success, so /model can use it at once.
+// Codex runs device-code OAuth and fetches its account-scoped catalog. Both
+// save the provider entry before reporting success, so /model can use it at
+// once.
 //
 // The bare form (/auth openrouter) repurposes the input box as a masked
 // one-shot prompt — the same namePrompt machinery as /fork and /rename, with
@@ -59,10 +60,14 @@ func (m *model) authOpenRouterCommand(args []string) {
 	m.namePrompt.mask = true
 }
 
-// codexLoginResultMsg carries a completed device-code login back to the UI
-// goroutine. Credentials were written by codexauth; the UI commits the Whip
-// route only after that succeeds.
-type codexLoginResultMsg struct{ err error }
+// codexLoginResultMsg carries device-code login and account-catalog results
+// back to the UI goroutine. Credentials are committed before the catalog is
+// fetched, so a transient catalog error never strands a successful login.
+type codexLoginResultMsg struct {
+	models     []llm.ModelInfo
+	catalogErr error
+	err        error
+}
 
 func (m *model) authCodex() {
 	if m.busy {
@@ -80,28 +85,35 @@ func (m *model) authCodex() {
 	m.turnStart = time.Now()
 	p := m.prog
 	go func() {
-		err := (&codexauth.Source{}).DeviceLogin(ctx, func(code codexauth.DeviceCode) {
+		source := &codexauth.Source{}
+		err := source.DeviceLogin(ctx, func(code codexauth.DeviceCode) {
 			p.Send(noticeMsg(fmt.Sprintf(
 				"Codex sign-in: open %s and enter code %s. Press esc to cancel.",
 				code.VerificationURL,
 				code.UserCode,
 			)))
 		})
-		p.Send(codexLoginResultMsg{err: err})
+		result := codexLoginResultMsg{err: err}
+		if err == nil {
+			catalogCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			result.models, result.catalogErr = llm.NewCodex(config.CodexBaseURL, source).Models(catalogCtx)
+			cancel()
+		}
+		p.Send(result)
 	}()
 }
 
-func (m *model) applyCodexLoginResult(err error) {
+func (m *model) applyCodexLoginResult(result codexLoginResultMsg) {
 	m.busy = false
 	m.cancel = nil
 	m.interrupt1 = false
 	m.turnStart = time.Time{}
-	if errors.Is(err, context.Canceled) {
+	if errors.Is(result.err, context.Canceled) {
 		m.append(dimStyle.Render("Codex login cancelled"))
 		return
 	}
-	if err != nil {
-		m.append(errStyle.Render("Codex login failed: " + err.Error()))
+	if result.err != nil {
+		m.append(errStyle.Render("Codex login failed: " + result.err.Error()))
 		return
 	}
 	m.cfg.UpsertCodex()
@@ -109,7 +121,38 @@ func (m *model) applyCodexLoginResult(err error) {
 		m.append(errStyle.Render("config save failed: " + err.Error()))
 		return
 	}
-	m.append(dimStyle.Render("✓ Codex configured — gpt-5.4 @ codex is ready in /model"))
+	if result.catalogErr != nil {
+		m.append(dimStyle.Render("✓ Codex configured — gpt-5.4 @ codex is ready in /model"))
+		m.append(dimStyle.Render("Codex model catalog will retry on /model refresh: " + result.catalogErr.Error()))
+		return
+	}
+	if err := m.saveCodexCatalog(result.models); err != nil {
+		m.append(dimStyle.Render("✓ Codex configured — gpt-5.4 @ codex is ready in /model"))
+		m.append(dimStyle.Render("Codex model catalog could not be cached; /model refresh will retry: " + err.Error()))
+		return
+	}
+	m.append(dimStyle.Render(fmt.Sprintf("✓ Codex configured — %d account models are ready in /model", len(result.models))))
+}
+
+// saveCodexCatalog makes freshly authenticated subscription models available
+// before the next background refresh. The caller has already persisted the
+// provider route, so catalog-cache failure is recoverable.
+func (m *model) saveCodexCatalog(infos []llm.ModelInfo) error {
+	cats := config.LoadCatalogs()
+	cats[config.CodexProviderName] = config.Catalog{
+		FetchedAt: time.Now(),
+		BaseURL:   config.CodexBaseURL,
+		Models:    catalogLites(infos),
+	}
+	if err := config.SaveCatalogs(cats); err != nil {
+		return err
+	}
+	if m.agent != nil {
+		m.updateCatalogs(cats)
+	} else {
+		m.catalogs = cats
+	}
+	return nil
 }
 
 // authResultMsg carries a finished key validation back to the UI goroutine.

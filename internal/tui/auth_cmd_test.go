@@ -64,7 +64,10 @@ func TestCodexLoginResultConfiguresAndMakesModelPickable(t *testing.T) {
 	m := authTestModel(t)
 	m.busy = true
 	m.cancel = func() {}
-	m.applyCodexLoginResult(nil)
+	m.applyCodexLoginResult(codexLoginResultMsg{models: []llm.ModelInfo{
+		{ID: "gpt-5.6-sol", ContextLength: 1050000, ReasoningEfforts: []string{"low", "high"}, InputModalities: []string{"text", "image"}},
+		{ID: "gpt-5.6-terra", ContextLength: 1050000, InputModalities: []string{"text", "image"}},
+	}})
 
 	if m.busy || m.cancel != nil {
 		t.Fatal("completed Codex login should clear its busy state")
@@ -77,14 +80,20 @@ func TestCodexLoginResultConfiguresAndMakesModelPickable(t *testing.T) {
 	if m.mpicker == nil {
 		t.Fatal("Codex login should make the model picker available")
 	}
-	var found bool
+	var foundDefault, foundCatalog bool
 	for _, item := range m.mpicker.items {
 		if item.model == config.CodexDefaultModel && item.provider == config.CodexProviderName {
-			found = true
+			foundDefault = true
+		}
+		if item.model == "gpt-5.6-sol" && item.provider == config.CodexProviderName && item.fromCatalog {
+			foundCatalog = true
 		}
 	}
-	if !found {
+	if !foundDefault {
 		t.Fatalf("%s @ %s missing from picker: %+v", config.CodexDefaultModel, config.CodexProviderName, m.mpicker.items)
+	}
+	if !foundCatalog {
+		t.Fatalf("account catalog model missing from picker: %+v", m.mpicker.items)
 	}
 	if out := m.transcriptText(); !strings.Contains(out, "Codex configured") {
 		t.Errorf("success should be reported:\n%s", out)
@@ -93,7 +102,7 @@ func TestCodexLoginResultConfiguresAndMakesModelPickable(t *testing.T) {
 
 func TestCodexLoginResultFailureLeavesRouteUntouched(t *testing.T) {
 	m := authTestModel(t)
-	m.applyCodexLoginResult(errors.New("device login rejected"))
+	m.applyCodexLoginResult(codexLoginResultMsg{err: errors.New("device login rejected")})
 	if _, ok := m.cfg.Providers[config.CodexProviderName]; ok {
 		t.Fatal("failed Codex login must not configure a provider")
 	}

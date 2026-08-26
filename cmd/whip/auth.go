@@ -112,6 +112,15 @@ func authOpenRouter(baseURL, key string, envMode bool) error {
 // saveOpenRouterCatalog writes the freshly fetched model list into the
 // catalog cache. Best-effort: the TUI's TTL refresh recovers a failure.
 func saveOpenRouterCatalog(baseURL string, infos []llm.ModelInfo) {
+	if err := saveCatalog("openrouter", baseURL, infos); err != nil {
+		fmt.Fprintln(os.Stderr, "whip: catalog prefetch failed (the TUI will retry on its TTL):", err)
+	}
+}
+
+// saveCatalog records a freshly fetched provider catalog. Model capability
+// data stays out of config routes so an account's live catalog can evolve
+// without rewriting users' overrides.
+func saveCatalog(provider, baseURL string, infos []llm.ModelInfo) error {
 	cats := config.LoadCatalogs()
 	lites := make([]config.ModelInfoLite, len(infos))
 	for i, mi := range infos {
@@ -126,10 +135,8 @@ func saveOpenRouterCatalog(baseURL string, infos []llm.ModelInfo) {
 			lites[i].InPrice, lites[i].OutPrice, lites[i].CacheReadPrice = mi.Pricing.Rates()
 		}
 	}
-	cats["openrouter"] = config.Catalog{FetchedAt: time.Now(), BaseURL: baseURL, Models: lites}
-	if err := config.SaveCatalogs(cats); err != nil {
-		fmt.Fprintln(os.Stderr, "whip: catalog prefetch failed (the TUI will retry on its TTL):", err)
-	}
+	cats[provider] = config.Catalog{FetchedAt: time.Now(), BaseURL: baseURL, Models: lites}
+	return config.SaveCatalogs(cats)
 }
 
 // promptKey reads a key with echo disabled when stdin is a terminal,

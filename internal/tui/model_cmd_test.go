@@ -25,7 +25,10 @@ func TestBuildAgentCodexAuthNeedsNoAPIKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := config.SaveCatalogs(map[string]config.Catalog{
-		"codex": {Models: []config.ModelInfoLite{{ID: "gpt-5.4", ContextLength: 1, MaxCompletionTokens: 1}}},
+		"codex": {Models: []config.ModelInfoLite{
+			{ID: "gpt-5.4", ContextLength: 272000, MaxCompletionTokens: 128000, InputModalities: []string{"text", "image"}},
+			{ID: "gpt-5.6-sol", ContextLength: 1050000, ReasoningEfforts: []string{"low", "high"}, InputModalities: []string{"text", "image"}},
+		}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +54,23 @@ func TestBuildAgentCodexAuthNeedsNoAPIKey(t *testing.T) {
 	}
 	if ag.MaxTokens != 128000 || ag.ContextLimit != 272000 {
 		t.Fatalf("limits = max %d context %d", ag.MaxTokens, ag.ContextLimit)
+	}
+
+	// A model advertised only by the authenticated Codex catalog resolves and
+	// builds exactly like an OpenRouter catalog model; no per-model route is
+	// required in config.json.
+	catalogAgent, name, provider, err := buildAgent(cfg, "gpt-5.6-sol", "codex", "system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "gpt-5.6-sol" || provider != "codex" {
+		t.Fatalf("catalog route = %q @ %q", name, provider)
+	}
+	if catalogAgent.ContextLimit != 1050000 || catalogAgent.MaxTokens != 1050000 {
+		t.Fatalf("catalog limits = max %d context %d", catalogAgent.MaxTokens, catalogAgent.ContextLimit)
+	}
+	if !modelSupportsVision(cfg, name, catalogAgent.Model, config.LoadCatalogs(), provider) {
+		t.Fatal("Codex catalog image capability should reach the screenshot gate")
 	}
 }
 

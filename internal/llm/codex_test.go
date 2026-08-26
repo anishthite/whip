@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -81,8 +82,8 @@ func TestCodexStreamRequestAndEvents(t *testing.T) {
 	if got["model"] != "gpt-5.4" || got["instructions"] != "system prompt" || got["stream"] != true || got["store"] != false || got["tool_choice"] != "auto" || got["parallel_tool_calls"] != true {
 		t.Fatalf("request = %#v", got)
 	}
-	if got["max_output_tokens"] != float64(128000) {
-		t.Fatalf("max output tokens = %#v", got["max_output_tokens"])
+	if _, ok := got["max_output_tokens"]; ok {
+		t.Fatalf("Codex subscription request must omit max_output_tokens: %#v", got)
 	}
 	reasoning, ok := got["reasoning"].(map[string]any)
 	if !ok || reasoning["effort"] != "high" {
@@ -111,6 +112,10 @@ func TestCodexComplete(t *testing.T) {
 			http.Error(w, "complete streamed", http.StatusBadRequest)
 			return
 		}
+		if strings.Contains(string(body), `"max_output_tokens"`) {
+			http.Error(w, "max_output_tokens is not accepted by Codex subscriptions", http.StatusBadRequest)
+			return
+		}
 		fmt.Fprint(w, `{"output":[{"type":"message","content":[{"type":"output_text","text":"summary"}]}],"usage":{"input_tokens":9,"output_tokens":2}}`)
 	}))
 	defer srv.Close()
@@ -127,10 +132,50 @@ func TestCodexComplete(t *testing.T) {
 	}
 }
 
-func TestCodexModelsSkipsCatalog(t *testing.T) {
-	models, err := NewCodex("http://unused", codexSource(t)).Models(context.Background())
-	if err != nil || len(models) != 0 {
-		t.Fatalf("models = %+v, %v", models, err)
+func TestCodexModelsFetchesAccountCatalog(t *testing.T) {
+	var gotHeaders http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/codex/models" {
+			http.Error(w, "wrong route", http.StatusNotFound)
+			return
+		}
+		gotHeaders = r.Header.Clone()
+		fmt.Fprint(w, `{"models":[
+  {"slug":"gpt-5.6-sol","supported_in_api":true,"context_window":1050000,"supported_reasoning_levels":[{"effort":"none"},{"effort":"low"},{"effort":"max"}],"input_modalities":["text","image"]},
+  {"slug":"gpt-rollout","supported_in_api":false,"context_window":1000},
+  {"slug":"gpt-5.4","supported_in_api":true,"max_context_window":272000,"supported_reasoning_levels":[{"effort":"medium"}]}
+]}`)
+	}))
+	defer srv.Close()
+
+	models, err := NewCodex(srv.URL, codexSource(t)).Models(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotHeaders.Get("Authorization") != "Bearer access" || gotHeaders.Get("ChatGPT-Account-ID") != "account" || gotHeaders.Get("Originator") != "whip" {
+		t.Fatalf("catalog auth headers = %#v", gotHeaders)
+	}
+	if len(models) != 2 {
+		t.Fatalf("models = %+v, want two supported entries", models)
+	}
+	if got := models[0]; got.ID != "gpt-5.6-sol" || got.ContextLength != 1050000 || !got.SupportsVision() || strings.Join(got.ReasoningEfforts, ",") != "none,low,max" {
+		t.Fatalf("first model = %+v", got)
+	}
+	if got := models[1]; got.ID != "gpt-5.4" || got.ContextLength != 272000 || !got.SupportsVision() || strings.Join(got.ReasoningEfforts, ",") != "medium" {
+		t.Fatalf("second model = %+v", got)
+	}
+}
+
+func TestCodexModelsReturnsHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not entitled", http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	_, err := NewCodex(srv.URL, codexSource(t)).Models(context.Background())
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Status != "403 Forbidden" || !strings.Contains(httpErr.Body, "not entitled") {
+		t.Fatalf("error = %#v, want typed 403", err)
 	}
 }
 

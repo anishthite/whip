@@ -34,10 +34,59 @@ func NewCodex(baseURL string, source *codexauth.Source) *Codex {
 	}
 }
 
-// Models deliberately skips the Codex catalog. The subscription endpoint does
-// not expose the public /models contract, so configured limits remain the
-// source of truth.
-func (*Codex) Models(context.Context) ([]ModelInfo, error) { return []ModelInfo{}, nil }
+// Models fetches the account-scoped catalog exposed by the Codex subscription
+// backend. Unlike the public OpenAI /models response, its records use Codex
+// names and include the models this ChatGPT account may actually select.
+func (c *Codex) Models(ctx context.Context) ([]ModelInfo, error) {
+	if c.Source == nil {
+		return nil, codexauth.ErrLoginRequired
+	}
+	creds, err := c.Source.Credentials(ctx)
+	if err != nil {
+		return nil, err
+	}
+	hr, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/codex/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	setCodexHeaders(hr, creds)
+	resp, err := c.httpClient().Do(hr)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, httpError(resp)
+	}
+
+	var body codexModelsResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 10<<20)).Decode(&body); err != nil {
+		return nil, err
+	}
+	infos := make([]ModelInfo, 0, len(body.Models))
+	for _, model := range body.Models {
+		if model.Slug == "" || !model.SupportedInAPI {
+			continue
+		}
+		contextLength := model.ContextWindow
+		if contextLength == 0 {
+			contextLength = model.MaxContextWindow
+		}
+		modalities := model.InputModalities
+		if len(modalities) == 0 {
+			// Codex's model protocol defaults omitted modalities to text + image.
+			modalities = []string{"text", "image"}
+		}
+		info := ModelInfo{
+			ID:               model.Slug,
+			ContextLength:    contextLength,
+			ReasoningEfforts: model.ReasoningEfforts(),
+			InputModalities:  modalities,
+		}
+		infos = append(infos, info)
+	}
+	return infos, nil
+}
 
 // Stream maps the current conversation to a Responses API request and folds
 // its SSE events back into the existing Whip message shape.
@@ -155,15 +204,19 @@ func (c *Codex) post(ctx context.Context, body []byte, stream bool) (*http.Respo
 	if err != nil {
 		return nil, err
 	}
-	hr.Header.Set("Authorization", "Bearer "+creds.AccessToken)
-	hr.Header.Set("ChatGPT-Account-ID", creds.AccountID)
-	hr.Header.Set("Originator", "whip")
+	setCodexHeaders(hr, creds)
 	hr.Header.Set("OpenAI-Beta", "responses=experimental")
 	hr.Header.Set("Content-Type", "application/json")
 	if stream {
 		hr.Header.Set("Accept", "text/event-stream")
 	}
 	return c.httpClient().Do(hr)
+}
+
+func setCodexHeaders(hr *http.Request, creds codexauth.Credentials) {
+	hr.Header.Set("Authorization", "Bearer "+creds.AccessToken)
+	hr.Header.Set("ChatGPT-Account-ID", creds.AccountID)
+	hr.Header.Set("Originator", "whip")
 }
 
 func (c *Codex) httpClient() *http.Client {
@@ -179,12 +232,11 @@ func httpError(resp *http.Response) error {
 }
 
 type codexRequestBody struct {
-	Model           string         `json:"model"`
-	Instructions    string         `json:"instructions,omitempty"`
-	Input           []any          `json:"input"`
-	Tools           []responseTool `json:"tools,omitempty"`
-	MaxOutputTokens int            `json:"max_output_tokens,omitempty"`
-	Reasoning       *struct {
+	Model        string         `json:"model"`
+	Instructions string         `json:"instructions,omitempty"`
+	Input        []any          `json:"input"`
+	Tools        []responseTool `json:"tools,omitempty"`
+	Reasoning    *struct {
 		Effort string `json:"effort"`
 	} `json:"reasoning,omitempty"`
 	Store             bool   `json:"store"`
@@ -209,7 +261,6 @@ func codexRequest(req Request, stream bool) codexRequestBody {
 		Stream:            stream,
 		ToolChoice:        "auto",
 		ParallelToolCalls: true,
-		MaxOutputTokens:   req.MaxTokens,
 	}
 	var instructions []string
 	for _, msg := range req.Messages {
@@ -266,6 +317,36 @@ func codexRequest(req Request, stream bool) codexRequestBody {
 		})
 	}
 	return body
+}
+
+// codexModelsResponse is the subset of the Codex backend /models schema that
+// Whip needs to build selectable model routes. The backend owns availability;
+// unsupported or rollout-gated models are not inserted into this catalog.
+type codexModelsResponse struct {
+	Models []codexModel `json:"models"`
+}
+
+type codexModel struct {
+	Slug                     string                `json:"slug"`
+	SupportedInAPI           bool                  `json:"supported_in_api"`
+	ContextWindow            int                   `json:"context_window"`
+	MaxContextWindow         int                   `json:"max_context_window"`
+	SupportedReasoningLevels []codexReasoningLevel `json:"supported_reasoning_levels"`
+	InputModalities          []string              `json:"input_modalities"`
+}
+
+type codexReasoningLevel struct {
+	Effort string `json:"effort"`
+}
+
+func (m codexModel) ReasoningEfforts() []string {
+	efforts := make([]string, 0, len(m.SupportedReasoningLevels))
+	for _, level := range m.SupportedReasoningLevels {
+		if level.Effort != "" {
+			efforts = append(efforts, level.Effort)
+		}
+	}
+	return efforts
 }
 
 type responseMessage struct {

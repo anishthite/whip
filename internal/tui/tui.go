@@ -524,26 +524,32 @@ func (m *model) fetchCatalogs(force bool) {
 	}
 	dirty := false
 	for name, prov := range m.cfg.Providers {
-		if prov.API == "openai-codex-responses" {
-			if _, ok := cats[name]; ok {
-				delete(cats, name)
-				dirty = true
-			}
-			continue // configured limits are authoritative; Codex has no /models API
-		}
 		if c, ok := cats[name]; ok && !force && !c.Stale() && c.BaseURL == prov.BaseURL {
 			continue
 		}
-		key, keyErr := prov.ResolveKey()
-		if keyErr != nil {
-			config.LogEvent("catalog.fetch", name+" skipped: "+keyErr.Error())
-			continue
-		}
-		if key == "" {
-			continue
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		infos, err := llm.New(prov.BaseURL, key).Models(ctx)
+		var infos []llm.ModelInfo
+		var err error
+		if prov.API == "openai-codex-responses" {
+			if strings.TrimRight(prov.BaseURL, "/") != config.CodexBaseURL {
+				cancel()
+				config.LogEvent("catalog.fetch", name+" skipped: Codex credentials are only sent to "+config.CodexBaseURL)
+				continue
+			}
+			infos, err = llm.NewCodex(prov.BaseURL, &codexauth.Source{}).Models(ctx)
+		} else {
+			key, keyErr := prov.ResolveKey()
+			if keyErr != nil {
+				cancel()
+				config.LogEvent("catalog.fetch", name+" skipped: "+keyErr.Error())
+				continue
+			}
+			if key == "" {
+				cancel()
+				continue
+			}
+			infos, err = llm.New(prov.BaseURL, key).Models(ctx)
+		}
 		cancel()
 		if err != nil {
 			config.LogEvent("catalog.fetch", name+" failed: "+err.Error())
@@ -870,9 +876,6 @@ func buildAgent(cfg *config.Config, modelName, provName, sysPrompt string) (*age
 	//   - MaxTokens: the OUTPUT cap sent as max_tokens. Priority: config maxOut
 	//     → provider's max_completion_tokens → config context (last resort).
 	cat, hasCat := config.LoadCatalogs()[provName]
-	if prov.API == "openai-codex-responses" {
-		hasCat = false
-	}
 	ctxLimit := mdl.ContextWindow()
 	if hasCat {
 		if n := cat.ContextLength(apiID); n > 0 {
@@ -1754,7 +1757,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case codexLoginResultMsg:
-		m.applyCodexLoginResult(msg.err)
+		m.applyCodexLoginResult(msg)
 		return m, nil
 
 	case noticeMsg:
@@ -2388,9 +2391,6 @@ func (m *model) cursorOnLastLine() bool {
 // contextLimitFor returns the advertised context window for a model id on a
 // provider, from the cached /models catalog (0 when unknown).
 func (m *model) contextLimitFor(provName, apiID string) int {
-	if m.cfg != nil && m.cfg.Providers[provName].API == "openai-codex-responses" {
-		return 0
-	}
 	if cat, ok := m.catalogs[provName]; ok {
 		return cat.ContextLength(apiID)
 	}
@@ -2809,11 +2809,9 @@ func (m *model) supportsVision() bool {
 // buildAgent (which runs before the model exists) can gate the screenshot
 // sink the same way.
 func modelSupportsVision(cfg *config.Config, modelName, modelID string, catalogs map[string]config.Catalog, provName string) bool {
-	if cfg == nil || cfg.Providers[provName].API != "openai-codex-responses" {
-		if cat, ok := catalogs[provName]; ok {
-			if vision, found := cat.SupportsVision(modelID); found {
-				return vision
-			}
+	if cat, ok := catalogs[provName]; ok {
+		if vision, found := cat.SupportsVision(modelID); found {
+			return vision
 		}
 	}
 	if cfg != nil {

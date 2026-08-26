@@ -1,8 +1,9 @@
 package config
 
 // Codex uses ChatGPT subscription credentials from ~/.codex/auth.json rather
-// than an API key. Its Responses endpoint does not expose a compatible model
-// catalog, so these limits are the deliberately explicit route defaults.
+// than an API key. Its account-scoped catalog augments this fixed fallback
+// route after login, so these limits keep the provider usable if that fetch is
+// temporarily unavailable.
 const (
 	CodexProviderName   = "codex"
 	CodexBaseURL        = "https://chatgpt.com/backend-api"

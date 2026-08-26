@@ -26,6 +26,15 @@ func TestLoginCodexShowsDeviceInstructions(t *testing.T) {
 			w.Write([]byte(`{"authorization_code":"authorization-code","code_verifier":"verifier"}`))
 		case "/oauth/token":
 			w.Write([]byte(`{"access_token":"new-access","refresh_token":"new-refresh","id_token":"` + testJWT(t, expires, "account") + `"}`))
+		case "/codex/models":
+			if r.Header.Get("Authorization") != "Bearer new-access" || r.Header.Get("ChatGPT-Account-ID") != "account" {
+				http.Error(w, "missing Codex auth", http.StatusUnauthorized)
+				return
+			}
+			w.Write([]byte(`{"models":[
+  {"slug":"gpt-5.6-sol","supported_in_api":true,"context_window":1050000,"supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}],"input_modalities":["text","image"]},
+  {"slug":"gpt-5.6-terra","supported_in_api":true,"context_window":1050000,"input_modalities":["text","image"]}
+]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -34,7 +43,7 @@ func TestLoginCodexShowsDeviceInstructions(t *testing.T) {
 
 	var out bytes.Buffer
 	source := &codexauth.Source{HomeDir: t.TempDir(), HTTP: srv.Client(), IssuerURL: srv.URL}
-	if err := loginCodex(context.Background(), source, &out); err != nil {
+	if err := loginCodexAt(context.Background(), source, &out, srv.URL); err != nil {
 		t.Fatal(err)
 	}
 	printed := out.String()
@@ -43,7 +52,7 @@ func TestLoginCodexShowsDeviceInstructions(t *testing.T) {
 		"ABCD-1234",
 		"ctrl+c",
 		"saved to ~/.codex/auth.json",
-		"gpt-5.4 @ codex",
+		"2 account models are ready in /model",
 	} {
 		if !strings.Contains(printed, want) {
 			t.Fatalf("login output missing %q:\n%s", want, printed)
@@ -62,6 +71,10 @@ func TestLoginCodexShowsDeviceInstructions(t *testing.T) {
 	route := cfg.Models[config.CodexDefaultModel]
 	if len(route.Providers) != 1 || route.Providers[0] != config.CodexProviderName {
 		t.Fatalf("successful login did not configure the codex model route: %+v", route)
+	}
+	cat, ok := config.LoadCatalogs()[config.CodexProviderName]
+	if !ok || len(cat.Models) != 2 || cat.ContextLength("gpt-5.6-sol") != 1050000 {
+		t.Fatalf("successful login did not prefetch the Codex model catalog: %+v", cat)
 	}
 }
 
