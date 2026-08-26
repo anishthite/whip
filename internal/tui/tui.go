@@ -23,6 +23,7 @@ import (
 
 	"github.com/context-labs/whip/internal/agent"
 	"github.com/context-labs/whip/internal/browser"
+	"github.com/context-labs/whip/internal/codexauth"
 	"github.com/context-labs/whip/internal/computer"
 	"github.com/context-labs/whip/internal/config"
 	"github.com/context-labs/whip/internal/llm"
@@ -578,16 +579,29 @@ func (m *model) fetchCatalogs(force bool) {
 		if c, ok := cats[name]; ok && !force && !c.Stale() && c.BaseURL == prov.BaseURL {
 			continue
 		}
-		key, keyErr := prov.ResolveKey()
-		if keyErr != nil {
-			config.LogEvent("catalog.fetch", name+" skipped: "+keyErr.Error())
-			continue
-		}
-		if key == "" {
-			continue
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		infos, err := llm.New(prov.BaseURL, key).Models(ctx)
+		var infos []llm.ModelInfo
+		var err error
+		if prov.API == "openai-codex-responses" {
+			if strings.TrimRight(prov.BaseURL, "/") != config.CodexBaseURL {
+				cancel()
+				config.LogEvent("catalog.fetch", name+" skipped: Codex credentials are only sent to "+config.CodexBaseURL)
+				continue
+			}
+			infos, err = llm.NewCodex(prov.BaseURL, &codexauth.Source{}).Models(ctx)
+		} else {
+			key, keyErr := prov.ResolveKey()
+			if keyErr != nil {
+				cancel()
+				config.LogEvent("catalog.fetch", name+" skipped: "+keyErr.Error())
+				continue
+			}
+			if key == "" {
+				cancel()
+				continue
+			}
+			infos, err = llm.New(prov.BaseURL, key).Models(ctx)
+		}
 		cancel()
 		if err != nil {
 			config.LogEvent("catalog.fetch", name+" failed: "+err.Error())
@@ -904,12 +918,9 @@ func buildAgent(cfg *config.Config, modelName, provName, sysPrompt string) (*age
 			provName = mdl.Providers[0]
 		}
 	}
-	key, keyErr := prov.ResolveKey()
-	if keyErr != nil {
-		return nil, "", "", keyErr
-	}
-	if key == "" {
-		return nil, "", "", fmt.Errorf("no API key for provider %q (set apiKey/apiKeyEnv in ~/.whip/config.json)", provName)
+	client, err := clientForProvider(prov, provName, cfg.MaxRetries)
+	if err != nil {
+		return nil, "", "", err
 	}
 	// Two distinct limits:
 	//   - ContextLimit: the input window (provider's context_length, else the
@@ -930,8 +941,6 @@ func buildAgent(cfg *config.Config, modelName, provName, sysPrompt string) (*age
 	if maxOut <= 0 {
 		maxOut = ctxLimit // generous default; provider clamps if it's too high
 	}
-	client := llm.New(prov.BaseURL, key)
-	client.MaxRetries = cfg.MaxRetries
 	ag := agent.New(client, apiID, maxOut, sysPrompt)
 	ag.ModelName, ag.Provider = modelName, provName
 	ag.ContextLimit = ctxLimit
@@ -1887,6 +1896,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyAuthResult(msg)
 		return m, nil
 
+	case codexLoginResultMsg:
+		m.applyCodexLoginResult(msg)
+		return m, nil
+
 	case noticeMsg:
 		m.append(dimStyle.Render(string(msg)))
 		return m, nil
@@ -2528,6 +2541,9 @@ func (m *model) contextLimitFor(provName, apiID string) int {
 // model's advertised rates; ok is false when the provider's catalog has no
 // pricing for the model, in which case the status line hides the segment.
 func (m *model) sessionCost() (float64, bool) {
+	if m.cfg != nil && m.cfg.Providers[m.provName].API == "openai-codex-responses" {
+		return 0, false
+	}
 	cat, ok := m.catalogs[m.provName]
 	if !ok {
 		return 0, false
@@ -2568,17 +2584,42 @@ func (m *model) applyCompactModel() {
 		}
 		return
 	}
-	key, keyErr := prov.ResolveKey()
-	if keyErr == nil && key != "" {
-		m.agent.CompactClient = llm.New(prov.BaseURL, key)
-		m.agent.CompactClient.MaxRetries = m.cfg.MaxRetries
+	client, err := clientForProvider(prov, m.compactProv, m.cfg.MaxRetries)
+	if err == nil {
+		m.agent.CompactClient = client
 		m.agent.CompactModel = apiID
 	} else if m.compactModel != "" {
-		if keyErr != nil {
-			m.append(errStyle.Render("compaction model: " + keyErr.Error() + " — using current model"))
-		} else {
-			m.append(errStyle.Render("compaction model: no API key — using current model"))
+		m.append(errStyle.Render("compaction model: " + err.Error() + " — using current model"))
+	}
+}
+
+func clientForProvider(prov config.Provider, name string, maxRetries int) (llm.Client, error) {
+	switch prov.API {
+	case "", "openai-completions":
+		key, err := prov.ResolveKey()
+		if err != nil {
+			return nil, err
 		}
+		if key == "" {
+			return nil, fmt.Errorf("no API key for provider %q (set apiKey/apiKeyEnv in ~/.whip/config.json)", name)
+		}
+		client := llm.New(prov.BaseURL, key)
+		client.MaxRetries = maxRetries
+		return client, nil
+	case "openai-codex-responses":
+		if prov.Auth != "codex" {
+			return nil, fmt.Errorf("codex provider %q requires auth:\"codex\"", name)
+		}
+		if strings.TrimRight(prov.BaseURL, "/") != "https://chatgpt.com/backend-api" {
+			return nil, fmt.Errorf("codex provider %q must use https://chatgpt.com/backend-api", name)
+		}
+		source := &codexauth.Source{}
+		if err := source.Available(); err != nil {
+			return nil, err
+		}
+		return llm.NewCodex(prov.BaseURL, source), nil
+	default:
+		return nil, fmt.Errorf("unsupported API %q for provider %q", prov.API, name)
 	}
 }
 

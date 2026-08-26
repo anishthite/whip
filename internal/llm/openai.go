@@ -314,8 +314,15 @@ func NewTool(name, desc, schema string) Tool {
 	return t
 }
 
-// Client talks to one provider endpoint.
-type Client struct {
+// Client is the provider contract consumed by the agent loop.
+type Client interface {
+	Models(context.Context) ([]ModelInfo, error)
+	Stream(context.Context, Request, func(string), func(string)) (Message, Usage, error)
+	Complete(context.Context, Request) (string, Usage, error)
+}
+
+// OpenAI talks to an OpenAI-compatible chat-completions endpoint.
+type OpenAI struct {
 	BaseURL string
 	APIKey  string
 	HTTP    *http.Client
@@ -328,19 +335,26 @@ type Client struct {
 }
 
 // attempts returns the total try count (initial + retries) for this client.
-func (c *Client) attempts() int {
+func (c *OpenAI) attempts() int {
 	if c.MaxRetries > 0 {
 		return c.MaxRetries
 	}
 	return DefaultMaxAttempts
 }
 
-func New(baseURL, apiKey string) *Client {
-	return &Client{
+func New(baseURL, apiKey string) *OpenAI {
+	return &OpenAI{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		APIKey:  apiKey,
 		HTTP:    &http.Client{Timeout: 10 * time.Minute},
 	}
+}
+
+// SetOnRetry installs the optional retry reporter used by the agent's active
+// turn. It keeps retry reporting outside the provider contract so providers
+// that do not retry do not need a no-op implementation.
+func (c *OpenAI) SetOnRetry(fn func(RetryEvent)) {
+	c.OnRetry = fn
 }
 
 // Request is a chat completions request.
@@ -588,7 +602,7 @@ func SessionCost(u Usage, in, out, cacheRead float64) float64 {
 }
 
 // Models fetches GET /models from the provider.
-func (c *Client) Models(ctx context.Context) ([]ModelInfo, error) {
+func (c *OpenAI) Models(ctx context.Context) ([]ModelInfo, error) {
 	hr, err := http.NewRequestWithContext(ctx, "GET", c.BaseURL+"/models", nil)
 	if err != nil {
 		return nil, err
@@ -623,7 +637,7 @@ func (c *Client) Models(ctx context.Context) ([]ModelInfo, error) {
 // the error is surfaced instead. A retry regenerates the whole assistant
 // message server-side; nothing in the request messages is mutated by a failed
 // attempt, so retrying is idempotent.
-func (c *Client) Stream(ctx context.Context, req Request, onText, onThink func(string)) (Message, Usage, error) {
+func (c *OpenAI) Stream(ctx context.Context, req Request, onText, onThink func(string)) (Message, Usage, error) {
 	req.Stream = true
 	req.StreamOptions = &struct {
 		IncludeUsage bool `json:"include_usage"`
@@ -666,7 +680,7 @@ func (c *Client) Stream(ctx context.Context, req Request, onText, onThink func(s
 // streamOnce performs a single streaming request attempt; the Stream retry
 // wrapper calls it per attempt and reads its own `emitted` flag (set by the
 // wrapped callbacks) to decide whether a retry would replay visible output.
-func (c *Client) streamOnce(ctx context.Context, body []byte, onText, onThink func(string)) (Message, Usage, error) {
+func (c *OpenAI) streamOnce(ctx context.Context, body []byte, onText, onThink func(string)) (Message, Usage, error) {
 	hr, err := http.NewRequestWithContext(ctx, "POST", c.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return Message{}, Usage{}, err
@@ -760,7 +774,7 @@ func (c *Client) streamOnce(ctx context.Context, body []byte, onText, onThink fu
 // content plus the reported usage. It's used internally by compaction's
 // summary call, where streaming would just add UI noise for a one-shot
 // synthesis.
-func (c *Client) Complete(ctx context.Context, req Request) (string, Usage, error) {
+func (c *OpenAI) Complete(ctx context.Context, req Request) (string, Usage, error) {
 	req.Stream = false
 	req.Messages = stripAuthored(req.Messages)
 	body, err := json.Marshal(req)
@@ -791,7 +805,7 @@ func (c *Client) Complete(ctx context.Context, req Request) (string, Usage, erro
 }
 
 // completeOnce performs one non-streaming request attempt.
-func (c *Client) completeOnce(ctx context.Context, body []byte) (string, Usage, error) {
+func (c *OpenAI) completeOnce(ctx context.Context, body []byte) (string, Usage, error) {
 	hr, err := http.NewRequestWithContext(ctx, "POST", c.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return "", Usage{}, err
