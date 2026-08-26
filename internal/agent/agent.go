@@ -216,28 +216,6 @@ func (a *Agent) MessagesSnapshot() []llm.Message {
 	return append([]llm.Message(nil), a.Messages...)
 }
 
-// UseHashlineTools swaps the read/edit entries in a.Tools for the
-// experimental hashline variants (hashline_read/hashline_edit). Called at
-// agent construction when experimental.hashlineEdit is set in config.
-func (a *Agent) UseHashlineTools() {
-	repl := map[string]tools.Tool{}
-	for _, t := range tools.Hashline() {
-		name := t.Def.Function.Name
-		switch name {
-		case "hashline_read":
-			name = "read"
-		case "hashline_edit":
-			name = "edit"
-		}
-		repl[name] = t
-	}
-	for i, cur := range a.Tools {
-		if t, ok := repl[cur.Def.Function.Name]; ok {
-			a.Tools[i] = t
-		}
-	}
-}
-
 // SetMCPTools swaps in the current MCP tool set (called by the MCP manager's
 // OnChange whenever a server settles). MCP tools live separately from
 // a.Tools so a settle mid-turn never mutates the slice a Turn is reading.
@@ -332,6 +310,7 @@ func (a *Agent) turn(ctx context.Context, input string, parts []llm.ContentPart,
 			Model:           a.Model,
 			Messages:        msgs,
 			Tools:           tools.Defs(a.AllTools()),
+			MaxTokens:       a.MaxTokens,
 			ReasoningEffort: a.Effort,
 		}, ev.OnText, ev.OnThink)
 		if clearRetry != nil {

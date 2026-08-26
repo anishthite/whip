@@ -905,9 +905,6 @@ func buildAgent(cfg *config.Config, modelName, provName, sysPrompt string) (*age
 	} else {
 		tools.ScreenshotSink = nil
 	}
-	if cfg.Experimental["hashlineEdit"] {
-		ag.UseHashlineTools()
-	}
 	return ag, modelName, provName, nil
 }
 
@@ -1100,9 +1097,7 @@ func (m *model) viewportView() string {
 }
 
 func (m *model) Init() tea.Cmd {
-	// Set the terminal title once Bubble Tea's renderer is live; /cd emits the
-	// same command after a successful directory change.
-	return tea.Batch(textarea.Blink, tea.SetWindowTitle(windowTitle()))
+	return textarea.Blink
 }
 
 func onOff(b bool) string {
@@ -1139,13 +1134,6 @@ func cwd() string {
 	}
 	return "?"
 }
-
-// windowTitle is the terminal window title whip sets while it's running —
-// "whip <cwd>", mirroring pi's "pi <cwd>". bubbletea emits it as an OSC 2
-// sequence (ansi.SetWindowTitle); the shell re-claims the title at its next
-// prompt after whip exits, so we don't need to restore it ourselves.
-// Test: TestWindowTitleTracksCwd (shell_test.go).
-func windowTitle() string { return "whip " + cwd() }
 
 // detectColorScheme figures out whether the terminal background is light and
 // calls SetLightTheme so markdown renders with a matching (high-contrast)
@@ -3014,7 +3002,8 @@ func (m *model) command(text string) (tea.Model, tea.Cmd) {
 	case "/lsp":
 		return m.lspCommand(fields)
 	case "/cd":
-		return m, m.cdCommand(strings.TrimSpace(strings.TrimPrefix(text, "/cd")))
+		m.cdCommand(strings.TrimSpace(strings.TrimPrefix(text, "/cd")))
+		return m, nil
 	case "/pwd":
 		m.append(dimStyle.Render(cwd()))
 		return m, nil

@@ -242,10 +242,6 @@ credentials are accepted only for `https://chatgpt.com/backend-api`. Tests:
   see the `ponytail` note in `shell.go`.
   Tests: `shell_test.go` (output/message routing idle+busy, queue-drain,
   truncation, echo rules, cd/pwd incl. `~` and bad dirs).
-- **Terminal window title.** While whip runs it sets the terminal's window/
-  tab title to `whip <cwd>` (pi shows `pi <cwd>`), and re-emits the title after
-  a successful `/cd` so the directory stays current. The shell reclaims the
-  title at its next prompt after whip exits, so no restore sequence is needed.
 - **`/goal-from-context [n]`** distills the last *n* conversation messages
   (default 8, clamped to the available history) into a detailed goal — a
   concrete outcome line plus a bullet list of checkable completion criteria —
@@ -392,35 +388,6 @@ toggle persistence round-trip, enable-on-blocked refusal),
 `config/config_test.go` (mcpImport JSONC round-trip, clobber recovery
 preserving the block), `cmd/whip/mcp_import_test.go` (import dry-run vs
 apply, idempotence, blocked servers never imported).
-
-## Experimental: hashline editing
-
-Opt in via `"experimental": {"hashlineEdit": true}` in `~/.whip/config.json`.
-When on, the agent's `read`/`edit` tools are swapped for `hashline_read` /
-`hashline_edit` (`tui.buildAgent` → `Agent.UseHashlineTools`; the system
-prompt's read/edit guidance is rewritten to match). Subagents and the MCP
-server mode keep the classic tools.
-
-`internal/tools/hashline.go` — Go port of oh-my-pi's hashline mode (via
-`@the-agency/pi-hashline-edit`, MIT). Every line gets a `LINE#HASH` anchor: a
-2-char tag from a pure-Go xxHash32 of the whitespace-stripped line over the
-nibble alphabet `ZPMQVRWSNKTXJBYH` (blank/punctuation-only lines are seeded
-with the line number so they don't collide). `hashline_read` renders
-`LINE#HASH:TEXT`; `hashline_edit` takes batched ops — `replace` (line at pos,
-or range pos..end; single-line requires `current`, the expected line text, to
-catch right-hash-wrong-line errors), `append` (after pos, default EOF),
-`prepend` (before pos, default BOF). All anchors validate before ANY
-mutation; on staleness the `HashlineMismatchError` returns the fresh tags with
-`>>>` on changed lines so the model self-corrects without re-reading. Edits
-apply bottom-up so line numbers stay valid mid-batch; identical duplicates are
-deduped; no-ops are reported. The reference's autocorrects (escaped-tab
-fixup, range trailing-dup trim) are deliberately not ported. File locking is
-unchanged: `hashline_edit` shares edit's arg shape, and `toolMutationPath`
-matches it by name so parallel hashline edits take the same per-path lock.
-
-Tests: `internal/tools/hashline_test.go` — hash/parse/apply unit tests ported
-from upstream plus `TestHashlineToolRoundTrip` (read → tag → edit → stale
-remap → create_if_missing through the public tool surface).
 
 ## Process safety
 

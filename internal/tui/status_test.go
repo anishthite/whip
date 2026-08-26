@@ -12,15 +12,10 @@ import (
 	"github.com/context-labs/whip/internal/llm"
 )
 
-// statusModel builds a model with an agent so statusView has data. Width is
-// generous (not newGrowModel's 80) so the status line isn't truncated by the
-// checkout directory's name — the test asserts status fields, not cwd width.
+// statusModel builds a model with an agent so statusView has data.
 func statusModel() *model {
 	m := newGrowModel()
 	m.agent = &agent.Agent{}
-	m.width = 120
-	m.input.SetWidth(m.width - 2)
-	m.layout()
 	return m
 }
 
