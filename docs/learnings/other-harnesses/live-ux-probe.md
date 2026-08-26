@@ -40,7 +40,7 @@ a terminal query it never times out is bricked in any non-mainstream terminal.*
 source at ~/code/coding-harnesses): quiet startup, `/goal`-style persistence,
 queued steers.
 
-**whip (ours, for contrast)**: trust gate → one header line
+**whip (ours, for contrast)**: one header line
 (`whip · model @ provider · cwd · 0% ctx ⚡ medium`) → `/` opens a clean
 completion list. Solid, but *silent*: no tips, no "what's loaded", no next-step
 guidance.
@@ -88,11 +88,9 @@ guidance.
 - claude's bordered welcome card with logo/what's-new/release-notes — heavy,
   marketing-flavored; the *information* (tips) matters, the box doesn't.
 - opencode's ASCII-art logo — one paint of charm, then permanent noise.
-- claude's auto-permission-mode banner complexity — ours is simpler (trust gate).
 
 ## Where whip already beats them
 
-- Trust gate is clearer than claude's (theirs buries the risk in chattiness).
 - MCP failure UX after the polish pass (fail-fast + did-you-mean + first-settle
   notes + auto-reconnect) — none of the probed harnesses showed anything close.
 - `/` completion exists at all (claude's is a filter-as-you-type; similar).

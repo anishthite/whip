@@ -63,6 +63,15 @@ func main() {
 		return
 	}
 
+	// `whip login codex` — compatible alias for `whip auth codex`.
+	if flag.NArg() > 0 && flag.Arg(0) == "login" {
+		if err := loginCLI(flag.Args()[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "whip:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// `whip mcp ...` — server management and the MCP server mode.
 	if flag.NArg() > 0 && flag.Arg(0) == "mcp" {
 		if err := mcpCLI(flag.Args()[1:], version); err != nil {
@@ -72,8 +81,7 @@ func main() {
 		return
 	}
 
-	// `whip run ...` — non-interactive one-turn mode for scripting; no TTY or
-	// trust prompt required (headless use implies trusted automation).
+	// `whip run ...` — non-interactive one-turn mode for scripting.
 	if flag.NArg() > 0 && flag.Arg(0) == "run" {
 		if err := runCLI(flag.Args()[1:]); err != nil {
 			fmt.Fprintln(os.Stderr, "whip:", err)
@@ -109,7 +117,7 @@ func main() {
 		return
 	}
 
-	// `whip auth ...` — provider key onboarding (openrouter).
+	// `whip auth ...` — provider onboarding (OpenRouter keys or Codex OAuth).
 	if flag.NArg() > 0 && flag.Arg(0) == "auth" {
 		if err := authCLI(flag.Args()[1:]); err != nil {
 			fmt.Fprintln(os.Stderr, "whip:", err)

@@ -187,7 +187,7 @@ pieces (policy, language, Chrome-AS script construction) test anywhere.
    reuse from browser_exec (browser_lang.go's parser is now shared).
 2. ✅ Chrome-via-AppleScript helpers (tabs/goto/js) — the flagship "drive the
    user's open Chrome with zero CDP setup" path. `internal/computer/chrome.go`.
-3. ✅ `computer_exec` tool + trust gate (codex-shaped per-app allow/deny in
+3. ✅ `computer_exec` tool + per-app allow/deny policy (codex-shaped controls in
    config via `computer.allow`/`computer.deny`/`defaultDeny`; consent hook
    installed — v1 surfaces the ask in-transcript, interactive approve-prompt
    is the follow-up).

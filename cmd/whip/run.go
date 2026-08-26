@@ -1,8 +1,8 @@
-// `whip run` — non-interactive (headless) mode: one turn of the agent with
-// no TUI and no trust prompt, for trusted automation and scripting. Piped
-// stdin is appended to the prompt. --format json emits the raw event stream
-// as newline-delimited JSON; the final event is {"type":"done",...} or
-// {"type":"error",...}. Exit code 0 on success, 1 on error.
+// `whip run` is a non-interactive (headless) mode for one agent turn in
+// automation and scripting. Piped stdin is appended to the prompt. --format
+// json emits the raw event stream as newline-delimited JSON; the final event
+// is {"type":"done",...} or {"type":"error",...}. Exit code 0 on
+// success, 1 on error.
 package main
 
 import (
