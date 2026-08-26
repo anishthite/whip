@@ -42,8 +42,9 @@ func TestCodexStreamRequestAndEvents(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"plan\"}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg-1\"}}\n\n")
 		fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n")
-		fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"bash\"}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc-1\",\"call_id\":\"call-1\",\"name\":\"bash\"}}\n\n")
 		fmt.Fprint(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"call_id\":\"call-1\",\"delta\":\"{\\\"command\\\":\\\"p\"}\n\n")
 		fmt.Fprint(w, "data: {\"type\":\"response.function_call_arguments.done\",\"call_id\":\"call-1\",\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}\n\n")
 		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":7,\"input_tokens_details\":{\"cached_tokens\":5}}}}\n\n")
@@ -73,8 +74,14 @@ func TestCodexStreamRequestAndEvents(t *testing.T) {
 	if msg.Content != "done" || text.String() != "done" || think.String() != "plan" {
 		t.Fatalf("message streams: msg=%+v text=%q think=%q", msg, text.String(), think.String())
 	}
+	if msg.ResponseID != "msg-1" {
+		t.Fatalf("response message ID = %q", msg.ResponseID)
+	}
 	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].ID != "call-1" || msg.ToolCalls[0].Function.Name != "bash" || msg.ToolCalls[0].Function.Arguments != `{"command":"pwd"}` {
 		t.Fatalf("tool calls: %+v", msg.ToolCalls)
+	}
+	if msg.ToolCalls[0].ItemID != "fc-1" {
+		t.Fatalf("tool call item ID = %q", msg.ToolCalls[0].ItemID)
 	}
 	if usage.PromptTokens != 12 || usage.CompletionTokens != 7 || usage.Cached() != 5 {
 		t.Fatalf("usage: %+v", usage)
@@ -129,6 +136,77 @@ func TestCodexComplete(t *testing.T) {
 	}
 	if text != "summary" || usage.PromptTokens != 9 || usage.CompletionTokens != 2 {
 		t.Fatalf("complete = %q, %+v", text, usage)
+	}
+}
+
+// Codex's Responses endpoint distinguishes a previous assistant output from a
+// new input message. In particular, output_text belongs to a completed message
+// item with an ID; sending it as a bare assistant message is rejected by the
+// subscription backend as an unknown content parameter.
+func TestCodexRequestUsesOutputMessageForAssistantHistory(t *testing.T) {
+	call := ToolCall{ID: "call-1", ItemID: "fc-1", Type: "function"}
+	call.Function.Name = "read"
+	call.Function.Arguments = `{"path":"README.md"}`
+	body := codexRequest(Request{
+		Model: "gpt-5.6-terra",
+		Messages: []Message{
+			{Role: "system", Content: "system prompt"},
+			{Role: "user", Content: "inspect the repository"},
+			{Role: "assistant", Content: "I will inspect it.", ResponseID: "msg-1", ToolCalls: []ToolCall{call}},
+			{Role: "tool", ToolCallID: "call-1", Content: "README contents"},
+		},
+	}, true)
+
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	input := got["input"].([]any)
+	if len(input) != 4 {
+		t.Fatalf("input = %#v", input)
+	}
+	assistant := input[1].(map[string]any)
+	if assistant["type"] != "message" || assistant["role"] != "assistant" {
+		t.Fatalf("assistant history = %#v", assistant)
+	}
+	if assistant["id"] != "msg-1" || assistant["status"] != "completed" {
+		t.Fatalf("assistant output identity = %#v", assistant)
+	}
+	content, ok := assistant["content"].([]any)
+	if !ok || len(content) != 1 {
+		t.Fatalf("assistant content = %#v", assistant["content"])
+	}
+	text := content[0].(map[string]any)
+	if text["type"] != "output_text" || text["text"] != "I will inspect it." {
+		t.Fatalf("assistant text = %#v", text)
+	}
+	if annotations, ok := text["annotations"].([]any); !ok || len(annotations) != 0 {
+		t.Fatalf("assistant annotations = %#v", text["annotations"])
+	}
+	callItem := input[2].(map[string]any)
+	if callItem["type"] != "function_call" || callItem["id"] != "fc-1" || callItem["call_id"] != "call-1" {
+		t.Fatalf("assistant tool call = %#v", callItem)
+	}
+}
+
+func TestCodexMessageID(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		msg  Message
+		want string
+	}{
+		{name: "provider ID", msg: Message{ResponseID: "msg-provider"}, want: "msg-provider"},
+		{name: "older session", want: "msg_3"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := codexMessageID(tt.msg, 3); got != tt.want {
+				t.Fatalf("codexMessageID = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

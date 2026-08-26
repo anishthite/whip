@@ -143,8 +143,10 @@ func (c *Codex) Stream(ctx context.Context, req Request, onText, onThink func(st
 				onThink(event.Delta)
 			}
 		case "response.output_item.added":
+			setResponseMessageID(&msg, event.Item)
 			calls.add(event.Item, false)
 		case "response.output_item.done", "response.function_call_arguments.done":
+			setResponseMessageID(&msg, event.Item)
 			calls.add(event.Item, true)
 			if event.CallID != "" {
 				calls.add(responseItem{CallID: event.CallID, Arguments: event.Arguments}, true)
@@ -153,6 +155,9 @@ func (c *Codex) Stream(ctx context.Context, req Request, onText, onThink func(st
 			calls.delta(event.CallID, event.Delta)
 		case "response.completed":
 			usage = event.Response.Usage.usage()
+			for _, item := range event.Response.Output {
+				setResponseMessageID(&msg, item)
+			}
 			calls.addAll(event.Response.Output)
 		}
 	}
@@ -257,7 +262,7 @@ type responseTool struct {
 }
 
 func codexRequest(req Request, stream bool) codexRequestBody {
-	req.Messages = repairToolHistory(stripAuthored(req.Messages))
+	req.Messages = repairToolHistory(stripAuthoredForCodex(req.Messages))
 	body := codexRequestBody{
 		Model:             req.Model,
 		Input:             []any{},
@@ -267,32 +272,47 @@ func codexRequest(req Request, stream bool) codexRequestBody {
 		ParallelToolCalls: true,
 	}
 	var instructions []string
+	messageIndex := 0
 	for _, msg := range req.Messages {
 		if msg.Role == "system" {
 			instructions = append(instructions, msg.TextContent())
 			continue
 		}
 		switch msg.Role {
-		case "user", "assistant":
-			content := []responseContent{}
+		case "user":
+			content := []responseInputContent{}
 			if text := msg.TextContent(); text != "" {
-				kind := "input_text"
-				if msg.Role == "assistant" {
-					kind = "output_text"
-				}
-				content = append(content, responseContent{Type: kind, Text: text})
+				content = append(content, responseInputContent{Type: "input_text", Text: text})
 			}
 			for _, part := range msg.Parts {
 				if part.Type == "image_url" && part.ImageURL != nil {
-					content = append(content, responseContent{Type: "input_image", ImageURL: part.ImageURL.URL})
+					content = append(content, responseInputContent{Type: "input_image", ImageURL: part.ImageURL.URL})
 				}
 			}
 			if len(content) > 0 {
-				body.Input = append(body.Input, responseMessage{Type: "message", Role: msg.Role, Content: content})
+				body.Input = append(body.Input, responseInputMessage{Type: "message", Role: "user", Content: content})
+			}
+		case "assistant":
+			if text := msg.TextContent(); text != "" {
+				// Codex accepts previous assistant text only as a completed output
+				// message item. A bare assistant input message with output_text is
+				// rejected as an unknown content parameter.
+				body.Input = append(body.Input, responseOutputMessage{
+					Type:   "message",
+					Role:   "assistant",
+					ID:     codexMessageID(msg, messageIndex),
+					Status: "completed",
+					Content: []responseOutputText{{
+						Type:        "output_text",
+						Text:        text,
+						Annotations: []any{},
+					}},
+				})
 			}
 			for _, call := range msg.ToolCalls {
 				body.Input = append(body.Input, responseItem{
 					Type:      "function_call",
+					ID:        call.ItemID,
 					CallID:    call.ID,
 					Name:      call.Function.Name,
 					Arguments: call.Function.Arguments,
@@ -305,6 +325,7 @@ func codexRequest(req Request, stream bool) codexRequestBody {
 				Output: msg.Content,
 			})
 		}
+		messageIndex++
 	}
 	body.Instructions = strings.Join(instructions, "\n\n")
 	if req.ReasoningEffort != "" {
@@ -353,10 +374,30 @@ func (m codexModel) ReasoningEfforts() []string {
 	return efforts
 }
 
-type responseMessage struct {
-	Type    string            `json:"type"`
-	Role    string            `json:"role"`
-	Content []responseContent `json:"content"`
+type responseInputMessage struct {
+	Type    string                 `json:"type"`
+	Role    string                 `json:"role"`
+	Content []responseInputContent `json:"content"`
+}
+
+type responseInputContent struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	ImageURL string `json:"image_url,omitempty"`
+}
+
+type responseOutputMessage struct {
+	Type    string               `json:"type"`
+	Role    string               `json:"role"`
+	ID      string               `json:"id"`
+	Status  string               `json:"status"`
+	Content []responseOutputText `json:"content"`
+}
+
+type responseOutputText struct {
+	Type        string `json:"type"`
+	Text        string `json:"text"`
+	Annotations []any  `json:"annotations"`
 }
 
 type responseContent struct {
@@ -390,6 +431,7 @@ type response struct {
 
 type responseItem struct {
 	Type      string            `json:"type"`
+	ID        string            `json:"id,omitempty"`
 	CallID    string            `json:"call_id"`
 	Name      string            `json:"name"`
 	Arguments string            `json:"arguments"`
@@ -442,6 +484,9 @@ func (c *callCollector) add(item responseItem, replace bool) {
 		c.calls = append(c.calls, ToolCall{ID: id, Type: "function"})
 	}
 	call := &c.calls[index]
+	if item.ID != "" {
+		call.ItemID = item.ID
+	}
 	if item.Name != "" {
 		call.Function.Name = item.Name
 	}
@@ -451,6 +496,19 @@ func (c *callCollector) add(item responseItem, replace bool) {
 		} else {
 			call.Function.Arguments += item.Arguments
 		}
+	}
+}
+
+func codexMessageID(msg Message, index int) string {
+	if msg.ResponseID != "" {
+		return msg.ResponseID
+	}
+	return fmt.Sprintf("msg_%d", index)
+}
+
+func setResponseMessageID(msg *Message, item responseItem) {
+	if msg.ResponseID == "" && item.Type == "message" && item.ID != "" {
+		msg.ResponseID = item.ID
 	}
 }
 

@@ -51,6 +51,10 @@ type Message struct {
 	// provider"), so a /model switch mid-session doesn't rewrite history
 	// silently. Internal only — never sent to the provider.
 	Model string `json:"model,omitempty"`
+	// ResponseID is the provider's output-message item ID. The Codex Responses
+	// API requires it when a prior assistant message is replayed as history.
+	// It is kept out of generic OpenAI-compatible requests.
+	ResponseID string `json:"response_id,omitempty"`
 	// RewoundFrom notes that this message replaced an earlier clipped one
 	// (rewind + resubmit). Internal only — never sent to the provider.
 	RewoundFrom string `json:"rewound_from,omitempty"`
@@ -117,6 +121,7 @@ type messageWire struct {
 	SentAt      *time.Time `json:"sent_at,omitempty"`
 	Usage       *Usage     `json:"usage,omitempty"`
 	Model       string     `json:"model,omitempty"`
+	ResponseID  string     `json:"response_id,omitempty"`
 	RewoundFrom string     `json:"rewound_from,omitempty"`
 }
 
@@ -126,7 +131,7 @@ func (m Message) MarshalJSON() ([]byte, error) {
 	w := messageWire{
 		Role: m.Role, Content: m.Content, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID,
 		Name: m.Name, Authored: m.Authored, SentAt: m.SentAt, Usage: m.Usage,
-		Model: m.Model, RewoundFrom: m.RewoundFrom,
+		Model: m.Model, ResponseID: m.ResponseID, RewoundFrom: m.RewoundFrom,
 	}
 	if len(m.Parts) > 0 {
 		parts := m.Parts
@@ -149,7 +154,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	m.Role, m.ToolCalls, m.ToolCallID, m.Name = raw.Role, raw.ToolCalls, raw.ToolCallID, raw.Name
-	m.Authored, m.SentAt, m.Usage, m.Model, m.RewoundFrom = raw.Authored, raw.SentAt, raw.Usage, raw.Model, raw.RewoundFrom
+	m.Authored, m.SentAt, m.Usage, m.Model, m.ResponseID, m.RewoundFrom = raw.Authored, raw.SentAt, raw.Usage, raw.Model, raw.ResponseID, raw.RewoundFrom
 	if len(raw.Content) == 0 {
 		return nil
 	}
@@ -177,7 +182,10 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 // whip-internal execution bookkeeping (never sent to the provider): how long
 // the tool ran and how it finished, for a future /tools perf view.
 type ToolCall struct {
-	ID       string `json:"id"`
+	ID string `json:"id"`
+	// ItemID is the provider's function-call item ID. Codex requires it when
+	// replaying a prior function call; generic providers never receive it.
+	ItemID   string `json:"item_id,omitempty"`
 	Type     string `json:"type"`
 	Function struct {
 		Name      string `json:"name"`
@@ -193,6 +201,16 @@ type ToolCall struct {
 // because req.Messages typically aliases the caller's conversation slice,
 // which must keep the fields for storage/recall.
 func stripAuthored(msgs []Message) []Message {
+	return stripInternal(msgs, false)
+}
+
+// stripAuthoredForCodex keeps the response-item IDs that Codex needs to
+// replay prior assistant output and function calls.
+func stripAuthoredForCodex(msgs []Message) []Message {
+	return stripInternal(msgs, true)
+}
+
+func stripInternal(msgs []Message, keepCodexIDs bool) []Message {
 	out := make([]Message, len(msgs))
 	copy(out, msgs)
 	for i := range out {
@@ -200,10 +218,16 @@ func stripAuthored(msgs []Message) []Message {
 		out[i].SentAt = nil
 		out[i].Usage = nil
 		out[i].Model = ""
+		if !keepCodexIDs {
+			out[i].ResponseID = ""
+		}
 		out[i].RewoundFrom = ""
 		for j := range out[i].ToolCalls {
 			out[i].ToolCalls[j].DurationMs = 0
 			out[i].ToolCalls[j].ExitCode = 0
+			if !keepCodexIDs {
+				out[i].ToolCalls[j].ItemID = ""
+			}
 		}
 	}
 	// Backfill tool-message Name from the owning call (older sessions predate
