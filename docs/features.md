@@ -163,17 +163,20 @@ compaction path must see immediately) are never retried. Each retry posts a
 
 `"api": "openai-codex-responses", "auth": "codex"` routes a configured
 model through the ChatGPT Codex Responses SSE endpoint without an API key.
-`internal/codexauth/auth.go` reads Pi's `~/.pi/agent/auth.json` first, then
-Codex CLI's `~/.codex/auth.json`; it derives missing account and expiry data
-from JWT claims, refreshes within five minutes of expiry, and atomically
-preserves unrelated auth-file fields. Tokens are never logged or sent to the
-conversation.
+`whip login codex` implements Codex's device-code sign-in: it shows the
+verification URL and one-time code, polls until approval (or ctrl+c), exchanges
+the server-provided PKCE verifier, and atomically stores the result in
+Codex-compatible `~/.codex/auth.json`. The resulting Codex state takes
+precedence; an existing Codex CLI login or Pi's `~/.pi/agent/auth.json` remains
+a fallback. `internal/codexauth/auth.go` derives missing account and expiry
+data from JWT claims, refreshes within five minutes of expiry, and preserves
+unrelated auth-file fields. Tokens are never logged or sent to the conversation.
 
 `internal/llm/codex.go` maps messages, tool calls, tool results, text/thinking
 deltas, and usage to Whip's existing provider contract. Codex skips `/models`;
 the configured `context` and `maxOut` limits remain authoritative. OAuth
 credentials are accepted only for `https://chatgpt.com/backend-api`. Tests:
-`codexauth/auth_test.go`, `llm/codex_test.go`, and
+`codexauth/auth_test.go`, `cmd/whip/login_test.go`, `llm/codex_test.go`, and
 `tui/model_cmd_test.go` (`TestBuildAgentCodexAuth*`).
 
 ## The TUI

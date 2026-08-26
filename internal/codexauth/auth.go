@@ -1,4 +1,4 @@
-// Package codexauth reads the local OAuth state created by Pi or Codex.
+// Package codexauth manages the local OAuth state used by Codex subscriptions.
 package codexauth
 
 import (
@@ -20,11 +20,16 @@ import (
 )
 
 const (
-	refreshURL = "https://auth.openai.com/oauth/token"
-	clientID   = "app_EMoamEEZ73f0CkXaXp7hrann"
+	issuerURL          = "https://auth.openai.com"
+	clientID           = "app_EMoamEEZ73f0CkXaXp7hrann"
+	deviceLoginTimeout = 15 * time.Minute
 )
 
-var ErrLoginRequired = errors.New("codex authentication not found; run pi /login openai-codex or codex login")
+var (
+	ErrLoginRequired          = errors.New("codex authentication not found; run whip login codex, pi /login openai-codex, or codex login")
+	ErrDeviceLoginUnsupported = errors.New("device-code login is not enabled for this Codex account")
+	ErrDeviceLoginTimeout     = errors.New("device login timed out after 15 minutes")
+)
 
 // Credentials are the non-persisted fields needed for one Codex request.
 // RefreshToken deliberately stays private so callers cannot accidentally log it.
@@ -33,15 +38,24 @@ type Credentials struct {
 	AccountID   string
 }
 
-// Source reads Pi auth first and falls back to Codex CLI auth. The exported
-// transport fields make the package testable without touching a real login.
+// Source reads Codex auth first and falls back to Pi. DeviceLogin writes
+// Codex-compatible credentials, so its result is the login Whip uses. The
+// exported transport fields make the package testable without a real login.
 type Source struct {
-	HomeDir  string
-	HTTP     *http.Client
-	TokenURL string
+	HomeDir   string
+	HTTP      *http.Client
+	IssuerURL string
+	TokenURL  string
 
 	mu  sync.Mutex
 	now func() time.Time
+}
+
+// DeviceCode is displayed to the user while DeviceLogin waits for approval.
+// It deliberately contains no OAuth credentials.
+type DeviceCode struct {
+	VerificationURL string
+	UserCode        string
 }
 
 // Available reports whether a usable local login exists. It does not refresh:
@@ -105,21 +119,17 @@ func (c candidate) credentials() Credentials {
 }
 
 func (s *Source) load() (*candidate, error) {
-	home := s.HomeDir
-	if home == "" {
-		var err error
-		home, err = os.UserHomeDir()
-		if err != nil {
-			return nil, ErrLoginRequired
-		}
+	home, err := s.homeDir()
+	if err != nil {
+		return nil, ErrLoginRequired
 	}
 
 	paths := []struct {
 		kind authKind
 		path string
 	}{
-		{kind: piAuth, path: filepath.Join(home, ".pi", "agent", "auth.json")},
 		{kind: codexAuth, path: filepath.Join(home, ".codex", "auth.json")},
+		{kind: piAuth, path: filepath.Join(home, ".pi", "agent", "auth.json")},
 	}
 	for _, p := range paths {
 		c, err := loadFile(p.kind, p.path)
@@ -135,6 +145,36 @@ func (s *Source) load() (*candidate, error) {
 		}
 	}
 	return nil, ErrLoginRequired
+}
+
+func (s *Source) homeDir() (string, error) {
+	if s.HomeDir != "" {
+		return s.HomeDir, nil
+	}
+	return os.UserHomeDir()
+}
+
+func (s *Source) codexCandidate() (*candidate, error) {
+	home, err := s.homeDir()
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(home, ".codex", "auth.json")
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return &candidate{kind: codexAuth, path: path, root: map[string]json.RawMessage{}}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	root := map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &root); err != nil {
+		return nil, err
+	}
+	if root == nil {
+		return nil, errors.New("auth file must contain a JSON object")
+	}
+	return &candidate{kind: codexAuth, path: path, root: root}, nil
 }
 
 func loadFile(kind authKind, path string) (*candidate, error) {
@@ -241,6 +281,196 @@ func jwtClaims(token string) (tokenClaims, bool) {
 	return claims, true
 }
 
+// DeviceLogin signs in with Codex's device-code flow. show receives the
+// verification URL and transient user code before this method waits for the
+// user to finish approval. It never receives OAuth credentials.
+func (s *Source) DeviceLogin(ctx context.Context, show func(DeviceCode)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	c, err := s.codexCandidate()
+	if err != nil {
+		return fmt.Errorf("read Codex credentials: %w", err)
+	}
+	device, err := s.requestDeviceCode(ctx)
+	if err != nil {
+		return err
+	}
+	if show != nil {
+		show(DeviceCode{
+			VerificationURL: s.issuer() + "/codex/device",
+			UserCode:        device.userCode,
+		})
+	}
+	tokens, err := s.pollDeviceCode(ctx, device)
+	if err != nil {
+		return err
+	}
+	c.access = tokens.AccessToken
+	c.refresh = tokens.RefreshToken
+	c.idToken = tokens.IDToken
+	c.expiresAt = expiryFromDuration(tokens.ExpiresIn, s.clock())
+	c.fillJWTClaims()
+	if c.accountID == "" {
+		return errors.New("could not determine Codex account from device login")
+	}
+	if c.expiresAt.IsZero() {
+		return errors.New("could not determine Codex token expiry from device login")
+	}
+	if err := c.save(s.clock()); err != nil {
+		return fmt.Errorf("save Codex credentials: %w", err)
+	}
+	return nil
+}
+
+type deviceLogin struct {
+	deviceAuthID string
+	userCode     string
+	interval     time.Duration
+}
+
+type tokenResponse struct {
+	AccessToken  string          `json:"access_token"`
+	RefreshToken string          `json:"refresh_token"`
+	IDToken      string          `json:"id_token"`
+	ExpiresIn    json.RawMessage `json:"expires_in"`
+}
+
+func (s *Source) requestDeviceCode(ctx context.Context) (deviceLogin, error) {
+	body, err := json.Marshal(struct {
+		ClientID string `json:"client_id"`
+	}{ClientID: clientID})
+	if err != nil {
+		return deviceLogin{}, fmt.Errorf("prepare device login: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.issuer()+"/api/accounts/deviceauth/usercode", bytes.NewReader(body))
+	if err != nil {
+		return deviceLogin{}, fmt.Errorf("start device login: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.httpClient().Do(req)
+	if err != nil {
+		return deviceLogin{}, fmt.Errorf("start device login: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return deviceLogin{}, ErrDeviceLoginUnsupported
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return deviceLogin{}, fmt.Errorf("start device login: server returned %s", resp.Status)
+	}
+	var out struct {
+		DeviceAuthID string          `json:"device_auth_id"`
+		UserCode     string          `json:"user_code"`
+		Interval     json.RawMessage `json:"interval"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil || out.DeviceAuthID == "" || out.UserCode == "" {
+		return deviceLogin{}, errors.New("start device login: invalid server response")
+	}
+	return deviceLogin{
+		deviceAuthID: out.DeviceAuthID,
+		userCode:     out.UserCode,
+		interval:     pollInterval(out.Interval),
+	}, nil
+}
+
+func (s *Source) pollDeviceCode(ctx context.Context, device deviceLogin) (tokenResponse, error) {
+	timeout := time.NewTimer(deviceLoginTimeout)
+	defer timeout.Stop()
+
+	for {
+		body, err := json.Marshal(struct {
+			DeviceAuthID string `json:"device_auth_id"`
+			UserCode     string `json:"user_code"`
+		}{DeviceAuthID: device.deviceAuthID, UserCode: device.userCode})
+		if err != nil {
+			return tokenResponse{}, fmt.Errorf("poll device login: %w", err)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.issuer()+"/api/accounts/deviceauth/token", bytes.NewReader(body))
+		if err != nil {
+			return tokenResponse{}, fmt.Errorf("poll device login: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := s.httpClient().Do(req)
+		if err != nil {
+			return tokenResponse{}, fmt.Errorf("poll device login: %w", err)
+		}
+		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			var out struct {
+				AuthorizationCode string `json:"authorization_code"`
+				CodeVerifier      string `json:"code_verifier"`
+			}
+			err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out)
+			_ = resp.Body.Close()
+			if err != nil || out.AuthorizationCode == "" || out.CodeVerifier == "" {
+				return tokenResponse{}, errors.New("poll device login: invalid server response")
+			}
+			return s.exchangeDeviceCode(ctx, out.AuthorizationCode, out.CodeVerifier)
+		}
+		status := resp.StatusCode
+		_ = resp.Body.Close()
+		if status != http.StatusForbidden && status != http.StatusNotFound {
+			return tokenResponse{}, fmt.Errorf("poll device login: server returned %s", resp.Status)
+		}
+
+		timer := time.NewTimer(device.interval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return tokenResponse{}, ctx.Err()
+		case <-timeout.C:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return tokenResponse{}, ErrDeviceLoginTimeout
+		case <-timer.C:
+		}
+	}
+}
+
+func (s *Source) exchangeDeviceCode(ctx context.Context, code, verifier string) (tokenResponse, error) {
+	form := url.Values{
+		"client_id":     {clientID},
+		"code":          {code},
+		"code_verifier": {verifier},
+		"grant_type":    {"authorization_code"},
+		"redirect_uri":  {s.issuer() + "/deviceauth/callback"},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.tokenURL(), bytes.NewBufferString(form.Encode()))
+	if err != nil {
+		return tokenResponse{}, fmt.Errorf("exchange device login: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := s.httpClient().Do(req)
+	if err != nil {
+		return tokenResponse{}, fmt.Errorf("exchange device login: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return tokenResponse{}, fmt.Errorf("exchange device login: server returned %s", resp.Status)
+	}
+	var out tokenResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil || out.AccessToken == "" || out.RefreshToken == "" || out.IDToken == "" {
+		return tokenResponse{}, errors.New("exchange device login: invalid server response")
+	}
+	return out, nil
+}
+
+func pollInterval(raw json.RawMessage) time.Duration {
+	seconds := int64(1)
+	text := strings.Trim(strings.TrimSpace(string(raw)), `"`)
+	if n, err := strconv.ParseInt(text, 10, 64); err == nil && n > 0 {
+		seconds = n
+	}
+	maxSeconds := int64(deviceLoginTimeout / time.Second)
+	if seconds > maxSeconds {
+		seconds = maxSeconds
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 func (s *Source) refresh(ctx context.Context, c *candidate) error {
 	form := url.Values{
 		"client_id":     {clientID},
@@ -254,20 +484,15 @@ func (s *Source) refresh(ctx context.Context, c *candidate) error {
 	hr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := s.httpClient().Do(hr)
 	if err != nil {
-		return errors.New("could not refresh codex login; run pi /login openai-codex or codex login")
+		return errors.New("could not refresh codex login; run whip login codex")
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return errors.New("could not refresh codex login; run pi /login openai-codex or codex login")
+		return errors.New("could not refresh codex login; run whip login codex")
 	}
-	var out struct {
-		AccessToken  string          `json:"access_token"`
-		RefreshToken string          `json:"refresh_token"`
-		IDToken      string          `json:"id_token"`
-		ExpiresIn    json.RawMessage `json:"expires_in"`
-	}
+	var out tokenResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil || out.AccessToken == "" {
-		return errors.New("could not refresh codex login; run pi /login openai-codex or codex login")
+		return errors.New("could not refresh codex login; run whip login codex")
 	}
 	c.access = out.AccessToken
 	if out.RefreshToken != "" {
@@ -279,10 +504,10 @@ func (s *Source) refresh(ctx context.Context, c *candidate) error {
 	c.expiresAt = expiryFromDuration(out.ExpiresIn, s.clock())
 	c.fillJWTClaims()
 	if c.accountID == "" {
-		return errors.New("could not determine codex account; run pi /login openai-codex or codex login")
+		return errors.New("could not determine codex account; run whip login codex")
 	}
 	if c.expiresAt.IsZero() {
-		return errors.New("could not determine codex token expiry; run pi /login openai-codex or codex login")
+		return errors.New("could not determine codex token expiry; run whip login codex")
 	}
 	if err := c.save(s.clock()); err != nil {
 		return fmt.Errorf("save refreshed codex login: %w", err)
@@ -323,8 +548,13 @@ func (c *candidate) save(now time.Time) error {
 		c.root["openai-codex"] = marshalRaw(fields)
 	} else {
 		fields := map[string]json.RawMessage{}
-		if err := json.Unmarshal(c.root["tokens"], &fields); err != nil {
-			return err
+		if raw, ok := c.root["tokens"]; ok {
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				return err
+			}
+			if fields == nil {
+				fields = map[string]json.RawMessage{}
+			}
 		}
 		fields["access_token"] = marshalRaw(c.access)
 		fields["refresh_token"] = marshalRaw(c.refresh)
@@ -333,6 +563,7 @@ func (c *candidate) save(now time.Time) error {
 		}
 		fields["account_id"] = marshalRaw(c.accountID)
 		c.root["tokens"] = marshalRaw(fields)
+		c.root["auth_mode"] = marshalRaw("chatgpt")
 		c.root["last_refresh"] = marshalRaw(now.UTC().Format(time.RFC3339))
 	}
 	data, err := json.MarshalIndent(c.root, "", "  ")
@@ -349,6 +580,9 @@ func marshalRaw(value any) json.RawMessage {
 
 func writeAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(dir, ".whip-codex-auth-*")
 	if err != nil {
 		return err
@@ -387,5 +621,12 @@ func (s *Source) tokenURL() string {
 	if s.TokenURL != "" {
 		return s.TokenURL
 	}
-	return refreshURL
+	return s.issuer() + "/oauth/token"
+}
+
+func (s *Source) issuer() string {
+	if s.IssuerURL != "" {
+		return strings.TrimRight(s.IssuerURL, "/")
+	}
+	return issuerURL
 }

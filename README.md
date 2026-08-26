@@ -48,8 +48,8 @@ OpenAI-compatible endpoint works as a provider.
 ## Codex subscription
 
 Whip can use an existing ChatGPT/Codex subscription instead of an API key.
-First sign in with `pi /login openai-codex` or `codex login`, then configure
-the provider explicitly:
+Run `whip login codex` and follow the displayed URL and one-time code, then
+configure the provider explicitly:
 
 ```json
 {
@@ -71,11 +71,11 @@ the provider explicitly:
 }
 ```
 
-Whip prefers Pi's local auth file and falls back to Codex CLI auth. Expiring
-tokens refresh locally and are never printed or added to conversations. This
-provider has no compatible model catalog, so set `context` and `maxOut`
-explicitly. OAuth credentials are only sent to
-`https://chatgpt.com/backend-api`.
+The login is saved in Codex-compatible `~/.codex/auth.json`; an existing Codex
+CLI login or Pi login is also detected. Expiring tokens refresh locally and
+are never printed or added to conversations. This provider has no compatible
+model catalog, so set `context` and `maxOut` explicitly. OAuth credentials are
+only sent to `https://chatgpt.com/backend-api`.
 
 ## First things to try
 

@@ -62,6 +62,15 @@ func main() {
 		return
 	}
 
+	// `whip login codex` — sign in to a ChatGPT subscription from Whip.
+	if flag.NArg() > 0 && flag.Arg(0) == "login" {
+		if err := loginCLI(flag.Args()[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "whip:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// `whip mcp ...` — server management and the MCP server mode.
 	if flag.NArg() > 0 && flag.Arg(0) == "mcp" {
 		if err := mcpCLI(flag.Args()[1:], version); err != nil {
