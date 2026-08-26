@@ -97,4 +97,4 @@ users can still add explicit model routes in config.
   and project-wide `go test` plus `go vet` pass with a temporary Go 1.27
   toolchain. Race builds are unavailable because this runner lacks CGO and a
   C compiler.
-- [ ] Commit, push, and open a draft PR against `anishthite/main`.
+- [x] Commit, push, and open a draft PR against `anishthite/main`.
