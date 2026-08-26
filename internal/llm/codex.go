@@ -23,6 +23,9 @@ type Codex struct {
 	HTTP    *http.Client
 }
 
+// codexModelsClientVersion is required by the subscription catalog endpoint.
+const codexModelsClientVersion = "0.0.0"
+
 var _ Client = (*OpenAI)(nil)
 var _ Client = (*Codex)(nil)
 
@@ -45,7 +48,8 @@ func (c *Codex) Models(ctx context.Context) ([]ModelInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	hr, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/codex/models", nil)
+	modelsURL := c.BaseURL + "/codex/models?client_version=" + codexModelsClientVersion
+	hr, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
 	if err != nil {
 		return nil, err
 	}

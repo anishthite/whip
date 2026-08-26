@@ -139,6 +139,10 @@ func TestCodexModelsFetchesAccountCatalog(t *testing.T) {
 			http.Error(w, "wrong route", http.StatusNotFound)
 			return
 		}
+		if got := r.URL.Query().Get("client_version"); got != codexModelsClientVersion {
+			http.Error(w, "missing client_version", http.StatusBadRequest)
+			return
+		}
 		gotHeaders = r.Header.Clone()
 		fmt.Fprint(w, `{"models":[
   {"slug":"gpt-5.6-sol","supported_in_api":true,"context_window":1050000,"supported_reasoning_levels":[{"effort":"none"},{"effort":"low"},{"effort":"max"}],"input_modalities":["text","image"]},
