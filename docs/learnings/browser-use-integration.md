@@ -279,7 +279,7 @@ content-returning tool, closing the "JS eval navigated the page" hole.
   `browser_exec` + `browser_screenshot` with a persistent namespace and an
   exec lock). The second one is hermes's design pre-packaged as MCP,
   including native `ImageContent` screenshot returns.
-- Config/trust: `~/.whip/config.json` sections + per-folder trust store.
+- Config: `~/.whip/config.json` sections.
 
 ## 4. Integration options, re-ranked with evidence
 
@@ -338,7 +338,7 @@ single-binary story.
 flowchart LR
     P0["Phase 0 — today<br/>MCP config +<br/>flattenResult images"] --> P1["Phase 1 — ~300 LOC<br/>browser_exec built-in<br/>+ install + safety floor<br/>+ session locks"]
     P1 --> P2["Phase 2<br/>screenshot → vision<br/>loop"]
-    P2 --> P3["Phase 3<br/>trust gate +<br/>/browser takeover"]
+    P2 --> P3["Phase 3<br/>/browser takeover"]
 ```
 
 **Phase 0 (today, config-only)**: document the `cli_mcp` MCP config in
@@ -374,8 +374,7 @@ Validates workflows end-to-end.
 jpeg re-encode, no cgo) → attach. Start with the user-message injection
 (5b); graduate to tool-message parts if providers behave.
 
-**Phase 3 — trust & takeover**: gate `browser_exec` on folder trust like
-bash (it *is* arbitrary Python); `browser.headed`/`cdpUrl` config +
+**Phase 3 — takeover**: `browser.headed`/`cdpUrl` config +
 `/browser connect` for human takeover; login-wall rule already in the
 description; consider the `browser_screenshot` separate tool from cli_mcp
 as a second built-in (cheaper than exec for pure observation).
@@ -405,14 +404,14 @@ native-Go), Camofox, recordings (the CLI has them; revisit if users ask).
    (hermes does; the daemon path-traversal-guards too).
 6. Helpers star-import a user/agent-writable `agent_helpers.py` from the
    workspace — that's code execution persisting across calls. Powerful
-   (the agent extends its own tools) but note it in the trust story.
+   (the agent extends its own tools) but document it as a safety concern.
 7. Windows: daemon IPC is TCP loopback + token; the CLI hides console
    windows; screenshot paths are drive-letter form. Whip's Windows support
    is currently minimal — fine to ship POSIX-first, say so.
 8. The daemon's local-Chrome mode *attaches to the user's real browser* —
    cookies, sessions, everything. That's the feature (logged-in work) and
-   the hazard (the agent acts as the user). The trust gate + step-label
-   visibility + `/browser status` are what make it acceptable.
+   the hazard (the agent acts as the user). Step-label visibility and
+   `/browser status` are what make it acceptable.
 9. Legacy-stack lessons that transfer to whichever path whip ships:
    daemon-spawning commands must redirect stdout/stderr to **files, not
    pipes** (inherited FDs keep pipes open forever); kill process **trees**

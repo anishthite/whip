@@ -71,8 +71,7 @@ func main() {
 		return
 	}
 
-	// `whip run ...` — non-interactive one-turn mode for scripting; no TTY or
-	// trust prompt required (headless use implies trusted automation).
+	// `whip run ...` — non-interactive one-turn mode for scripting.
 	if flag.NArg() > 0 && flag.Arg(0) == "run" {
 		if err := runCLI(flag.Args()[1:]); err != nil {
 			fmt.Fprintln(os.Stderr, "whip:", err)

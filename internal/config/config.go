@@ -125,7 +125,6 @@ type Config struct {
 	CompactProvider string              `json:"compactProvider,omitempty"` // provider for the compaction model; "" = the model's default routing
 	CompactPct      int                 `json:"compactPct,omitempty"`      // compact at this % of the context window; 0 = DefaultCompactPct
 	Theme           string              `json:"theme,omitempty"`           // "light", "dark", or "" (auto-detect at startup)
-	NoTrustPrompt   bool                `json:"noTrustPrompt,omitempty"`   // never show the folder-trust dialog; untrusted folders just decline
 	Mouse           *bool               `json:"mouse,omitempty"`           // false disables capture so native terminal selection works
 	Thinking        *bool               `json:"thinking,omitempty"`        // nil defaults to on; false hides reasoning tokens (ctrl+o)
 	GoalMaxRounds   int                 `json:"goalMaxRounds,omitempty"`   // global goal-loop round cap; 0 = DefaultGoalMaxRounds; projects.json may override per folder
