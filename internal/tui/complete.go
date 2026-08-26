@@ -13,33 +13,25 @@ type cand struct {
 	Desc string
 }
 
-var commands = []cand{
-	{"/cd", "[dir] — change working directory (bare prints it)"},
-	{"/clear", "Reset the conversation"},
-	{"/compact", "[model] [provider]|off — compact now, or pick the compaction model"},
-	{"/computer-use", "[task] — drive this Mac (apps, open Chrome, screen); also: allow|deny <app>"},
-	{"/context-doctor", "Audit what a fresh session injects (skills, MCP, tool schemas) and its token cost"},
-	{"/effort", "[level] — reasoning effort: off·low·medium·high (bare opens selector)"},
-	{"/fork", "[name] — copy the conversation into a new named session"},
-	{"/goal", "<text> — work until done; also: resume, clear, rounds <n>|default [--global]"},
-	{"/goal-from-context", "[n] — formulate a goal from the last n messages (default 8) and work until it's done"},
-	{"/help", "Show available commands"},
-	{"/mcp", "[name] [reconnect|enable|disable] — MCP servers: status, reconnect, toggle"},
-	{"/model", "<model> [provider] — switch model (refresh: pull provider catalogs now)"},
-	{"/mouse", "Toggle mouse capture (off = native terminal selection)"},
-	{"/pwd", "Print working directory"},
-	{"/rename", "[title] — retitle this session"},
-	{"/theme", "[light|dark|auto] — color scheme (bare opens switcher)"},
-	{"/quit", "Exit whip"},
-	{"/resume", "[id] — browse and resume previous sessions"},
-	{"/tasks", "[id] — background subagents: focus the dock, or open one subagent's live view"},
+// commands is the tab-completion table, built from the registry so a command
+// can never be dispatchable but uncompletable (or vice versa).
+var commands = completionTable()
+
+// completionTable derives the tab-completion table from the registry, so a
+// command can never be dispatchable but uncompletable (or vice versa).
+func completionTable() []cand {
+	var out []cand
+	for _, e := range slashRegistry() {
+		out = append(out, cand{e.Name, e.Hint})
+	}
+	return out
 }
 
 // execNow lists commands the menu runs immediately on enter (they act
 // sensibly with no arguments); others insert themselves for arguments.
 var execNow = map[string]bool{
 	"/clear": true, "/compact": true, "/computer-use": true, "/computer": true, "/context-doctor": true, "/effort": true, "/goal": true, "/goal-from-context": true, "/help": true,
-	"/mcp": true, "/model": true, "/mouse": true, "/pwd": true, "/quit": true, "/resume": true, "/tasks": true,
+	"/mcp": true, "/model": true, "/mouse": true, "/pwd": true, "/quit": true, "/report": true, "/resume": true, "/tasks": true,
 }
 
 // completions splits val into an untouched head and candidates for its last

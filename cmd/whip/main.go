@@ -71,9 +71,28 @@ func main() {
 		return
 	}
 
+	// `whip run ...` — non-interactive one-turn mode for scripting; no TTY or
+	// trust prompt required (headless use implies trusted automation).
+	if flag.NArg() > 0 && flag.Arg(0) == "run" {
+		if err := runCLI(flag.Args()[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "whip:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// `whip browser ...` — browser tooling (install the drive-my-tab extension).
 	if flag.NArg() > 0 && flag.Arg(0) == "browser" {
 		if err := browserCLI(flag.Args()[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "whip:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// `whip update` — re-run the install script to get the latest release.
+	if flag.NArg() > 0 && flag.Arg(0) == "update" {
+		if err := updateCLI(); err != nil {
 			fmt.Fprintln(os.Stderr, "whip:", err)
 			os.Exit(1)
 		}
@@ -96,6 +115,7 @@ func main() {
 		_ = agent.New(llm.New(prov.BaseURL, "bench"), id, mdl.MaxTokens, systemPrompt())
 		return
 	}
+	tui.Version = version // /report names the build in the bug-report bundle
 	sessionID, err := tui.Run(cfg, *modelFlag, *providerFlag, systemPrompt(), *resumeFlag)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "whip:", err)

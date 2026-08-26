@@ -12,10 +12,10 @@ import (
 // checkTrust gates startup on the folder-trust dialog. If the cwd is already
 // trusted (~/.whip/trusted.json), it returns immediately. Otherwise it asks
 // on the terminal (plain stdin/stdout — this runs before the TUI starts):
-// "Yes, proceed" records the path; "No, exit" declines; "Never show again"
-// records the path and sets noTrustPrompt in config.json so the dialog never
-// appears for future folders (which then decline without asking). When stdin
-// isn't a terminal (piped run, tests), we can't ask — decline safely.
+// Enter or "y" records the path; "never" records the path and disables future
+// prompts (untrusted folders then decline without asking). Anything else
+// declines. When stdin isn't a terminal (piped run, tests), we can't ask —
+// decline safely.
 func checkTrust() (bool, error) {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -37,23 +37,23 @@ func checkTrust() (bool, error) {
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "With your permission whip may execute files in this folder. Executing untrusted code is unsafe.")
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprint(os.Stderr, "  1. Yes, proceed\n  2. No, exit\n  3. Never show again\n\n❯ ")
+	fmt.Fprint(os.Stderr, "Proceed? [Y/n] (or \"never\" to disable future prompts) ")
 	r := bufio.NewReader(os.Stdin)
 	ans, err := r.ReadString('\n')
 	if err != nil {
 		return false, err
 	}
-	return trustChoice(wd, strings.TrimSpace(ans))
+	return trustChoice(wd, ans)
 }
 
 func trustChoice(wd, answer string) (bool, error) {
-	switch answer {
-	case "1":
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "", "y", "yes", "1":
 		if err := config.Trust(wd); err != nil {
 			return false, err
 		}
 		return true, nil
-	case "3":
+	case "never", "3":
 		if err := config.Trust(wd); err != nil {
 			return false, err
 		}
