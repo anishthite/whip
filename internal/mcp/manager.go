@@ -54,6 +54,7 @@ type Server struct {
 	Note   string // import notes (e.g. claude sse transport)
 	Err    string // failure detail when Status == StatusFailed
 	Tools  int    // tools contributed when ready
+	Source string // config file the server was discovered from ("" when unknown)
 }
 
 // server holds one server's live state.
@@ -628,7 +629,7 @@ func (m *Manager) SetBlocked(cfgs map[string]ServerConfig) {
 	defer m.onChangeMu.Unlock()
 	m.blocked = make([]Server, 0, len(cfgs))
 	for name, c := range cfgs {
-		m.blocked = append(m.blocked, Server{Name: name, Status: StatusDisabled, Note: c.Note})
+		m.blocked = append(m.blocked, Server{Name: name, Status: StatusDisabled, Note: c.Note, Source: c.Source})
 	}
 	sort.Slice(m.blocked, func(i, j int) bool { return m.blocked[i].Name < m.blocked[j].Name })
 }
@@ -658,7 +659,7 @@ func (m *Manager) Statuses() []Server {
 	out := make([]Server, 0, len(m.servers))
 	for _, s := range m.servers {
 		s.mu.Lock()
-		out = append(out, Server{Name: s.name, Status: s.status, Note: s.note, Err: s.err, Tools: len(s.defs)})
+		out = append(out, Server{Name: s.name, Status: s.status, Note: s.note, Err: s.err, Tools: len(s.defs), Source: s.cfg.Source})
 		s.mu.Unlock()
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -707,9 +708,23 @@ func (m *Manager) Close() {
 // StreamableClientTransport (remote, header-injecting client).
 func defaultTransport(cfg ServerConfig, stderr *ringBuffer) (sdkmcp.Transport, error) {
 	if cfg.Remote() {
+		// Header values may be secret references ("$VAR"/"${VAR}"/"!cmd") —
+		// resolve them at connect time (the point of use) so configs hold only
+		// references and resolved secrets never reach the log or session store.
+		// Unresolvable references drop the header: the connect then fails
+		// cleanly instead of sending the literal reference upstream.
+		headers := make(map[string]string, len(cfg.Headers))
+		for k, v := range cfg.Headers {
+			rv, err := config.ResolveSecret(v)
+			if err != nil {
+				logf("header %s: %v (dropped)", k, err)
+				continue
+			}
+			headers[k] = rv
+		}
 		return &sdkmcp.StreamableClientTransport{
 			Endpoint:   cfg.URL,
-			HTTPClient: &http.Client{Transport: headerTransport(cfg.Headers)},
+			HTTPClient: &http.Client{Transport: headerTransport(headers)},
 			// ponytail: the standalone SSE stream would deliver server-initiated
 			// notifications (tool list changes); request-response is enough for v1
 			DisableStandaloneSSE: true,

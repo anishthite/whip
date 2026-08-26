@@ -15,25 +15,41 @@ type Provider struct {
 	BaseURL   string `json:"baseUrl"`
 	API       string `json:"api"`              // "openai-completions" or "openai-codex-responses"
 	Auth      string `json:"auth,omitempty"`   // "codex" reuses a local Pi/Codex OAuth login
-	APIKey    string `json:"apiKey,omitempty"` // literal key, or use apiKeyEnv
+	APIKey    string `json:"apiKey,omitempty"` // literal key or a secret reference ("$VAR"/"${VAR}"/"!cmd"); apiKeyEnv is another option
 	APIKeyEnv string `json:"apiKeyEnv,omitempty"`
 }
 
-// Key returns the resolved API key for the provider.
+// Key returns the resolved API key for the provider, "" when none is
+// configured. Unresolvable secret references degrade to "" like a missing
+// key; ResolveKey reports the error for callers that can surface it.
 func (p Provider) Key() string {
+	k, _ := p.ResolveKey()
+	return k
+}
+
+// ResolveKey is Key with error detail: apiKey/apiKeyEnv may hold a secret
+// reference (see ResolveSecret), resolved here at the point of use so the
+// config file and session store hold only references and a missing var only
+// errors when the provider is actually used. The resolved value never enters
+// the event log.
+func (p Provider) ResolveKey() (string, error) {
 	if p.APIKeyEnv != "" {
 		if v := os.Getenv(p.APIKeyEnv); v != "" {
-			return v
+			return v, nil
 		}
 	}
 	if p.APIKey != "" {
-		return p.APIKey
+		k, err := ResolveSecret(p.APIKey)
+		if err != nil {
+			return "", fmt.Errorf("provider %q apiKey: %w", p.Name, err)
+		}
+		return k, nil
 	}
 	// ponytail: special-case fallback to the inf CLI's stored key; generalize to apiKeyFile if more providers need it
 	if strings.Contains(p.BaseURL, "api.inference.net") {
-		return infKey()
+		return infKey(), nil
 	}
-	return ""
+	return "", nil
 }
 
 // infKey reads apiKey/codingAgentApiKey from ~/.inf/config.json (written by `inf auth set-key`).
@@ -110,9 +126,9 @@ type Config struct {
 	CompactProvider string              `json:"compactProvider,omitempty"` // provider for the compaction model; "" = the model's default routing
 	CompactPct      int                 `json:"compactPct,omitempty"`      // compact at this % of the context window; 0 = DefaultCompactPct
 	Theme           string              `json:"theme,omitempty"`           // "light", "dark", or "" (auto-detect at startup)
-	NoTrustPrompt   bool                `json:"noTrustPrompt,omitempty"`   // never show the folder-trust dialog; untrusted folders just decline
 	Mouse           *bool               `json:"mouse,omitempty"`           // false disables capture so native terminal selection works
 	Thinking        *bool               `json:"thinking,omitempty"`        // nil defaults to on; false hides reasoning tokens (ctrl+o)
+	CollapsePaste   *bool               `json:"collapsePaste,omitempty"`   // nil/false: pastes land verbatim; true collapses ≥3-line pastes into a [Pasted ~N lines] placeholder
 	GoalMaxRounds   int                 `json:"goalMaxRounds,omitempty"`   // global goal-loop round cap; 0 = DefaultGoalMaxRounds; projects.json may override per folder
 	MaxRetries      int                 `json:"maxRetries,omitempty"`      // attempts per provider request on transient failures (429/5xx/network); 0 = llm.DefaultMaxAttempts, 1 = no retries
 	Providers       map[string]Provider `json:"providers"`
@@ -143,7 +159,9 @@ type ComputerConfig struct {
 	Allow []string `json:"allow,omitempty"`
 	// Deny lists apps never drivable (wins over allow).
 	Deny []string `json:"deny,omitempty"`
-	// DefaultDeny (default true) requires approval for unlisted apps.
+	// DefaultDeny, when true, gates unlisted apps behind approval. Default
+	// is false — allow-all, and users build blocklists via `deny` (or
+	// /computer-use deny <app> in-session).
 	DefaultDeny *bool `json:"defaultDeny,omitempty"`
 	// Enabled false hides computer_exec entirely.
 	Enabled *bool `json:"enabled,omitempty"`

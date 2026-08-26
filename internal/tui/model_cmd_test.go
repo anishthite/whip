@@ -83,6 +83,26 @@ func TestBuildAgentCodexRejectsCustomEndpoint(t *testing.T) {
 	}
 }
 
+func TestBuildAgentSurfacesUnresolvedSecret(t *testing.T) {
+	cfg := &config.Config{
+		DefaultModel: "test",
+		Providers: map[string]config.Provider{
+			"test": {
+				APIKey:  "$WHIP_TUI_SECRET_UNSET",
+				BaseURL: "https://example.com",
+			},
+		},
+		Models: map[string]config.Model{
+			"test": {Providers: []string{"test"}},
+		},
+	}
+
+	_, _, _, err := buildAgent(cfg, "", "", "system")
+	if err == nil || !strings.Contains(err.Error(), "WHIP_TUI_SECRET_UNSET") {
+		t.Fatalf("error = %v, want unresolved secret name", err)
+	}
+}
+
 func modelCmdModel() *model {
 	m := &model{
 		input: newInput(),

@@ -179,6 +179,27 @@ credentials are accepted only for `https://chatgpt.com/backend-api`. Tests:
 `codexauth/auth_test.go`, `cmd/whip/login_test.go`, `llm/codex_test.go`, and
 `tui/model_cmd_test.go` (`TestBuildAgentCodexAuth*`).
 
+`cmd/whip/auth.go`, `internal/config/openrouter.go`,
+`internal/tui/auth_cmd.go` — one-command provider onboarding, first (and
+currently only) for OpenRouter. `whip auth openrouter [--env] [<key>]` takes
+the key from arg / `OPENROUTER_API_KEY` / a masked prompt, **validates it
+against the live API before writing anything** (a rejected key leaves no
+trace), upserts the `openrouter` provider into config (literal `apiKey` by
+default — config is 0600; `--env` stores `apiKeyEnv: OPENROUTER_API_KEY` and
+offers to append the export to the shell rc), and pre-fetches the model
+catalog so `/model` lists the entire OpenRouter catalog immediately — every
+model usable with zero per-model config via catalog resolution. In-session,
+`/auth openrouter` (bare) repurposes the input box as a **masked** one-shot
+prompt (the `namePrompt` machinery with a `mask` flag — the key never
+echoes, and the inline-key form is kept out of ↑-recallable input history);
+a session already routed through openrouter is hot-rebuilt with the new key
+so re-authing fixes a 401 without a `/model` round-trip. Tests:
+`config/openrouter_test.go` (upsert modes, idempotence, `TrimKey`),
+`cmd/whip/auth_test.go` (httptest fake OpenRouter — good key wires provider
++ catalog + makes catalog models resolvable, bad key writes nothing,
+re-auth keeps other providers/models), `tui/auth_cmd_test.go` (usage,
+masked prompt open/cancel, good/bad result, live-session rekey).
+
 ## The TUI
 
 `internal/tui/tui.go` — bubbletea fullscreen alt-screen. Highlights:
@@ -493,6 +514,19 @@ spend once requests have run), a TOTAL line, and trim pointers. Built for
 users arriving from heavier harnesses whose first call silently carries tens
 of thousands of tokens of skill/MCP bloat. Tests: `tui/context_doctor_test.go`.
 
+**`/report`** — bug-report bundle for terminal/rendering issues: one
+transcript block pairing a clickable OSC 8 link (opens a prefilled
+`context-labs/whip` issue with a What-happened/Expected skeleton + the
+environment bundle in a fenced block) with the same bundle as a
+copy-pastable fenced snippet. Strict env whitelist (whip version/model/
+provider, theme + *how it was detected* — captured at startup, never
+re-queried, mouse, session id; TERM/TERM_PROGRAM/COLORTERM/COLORFGBG, tmux +
+`tmux -V`, SHELL, locale, window size, ssh flag; OS/arch, uname, sw_vers, Go
+version) — no secrets, no conversation content. Nothing is submitted or
+persisted: the user clicks or pastes. Version is plumbed from `main.version`
+via `tui.Version`. Tests: `tui/report_cmd_test.go` (whitelist, no-secret
+leak, issue URL round-trip, fenced snippet, busy-safe).
+
 **Startup resource report** — first paint names what whip loaded: `skills: N
 loaded`, one `⚠` line per degraded skill (description over maxDesc → truncated
 in the prompt) or unparseable SKILL.md (pi's [Skill conflicts] lesson — a
@@ -628,12 +662,12 @@ the on-disk driver).
   from Apple Events" toggle; the error surfaces it). Our osascript helper
   fixes mack's flaws: newlines preserved (tab lists stay readable), quotes
   escaped (no injection).
-- **Per-app consent gate** (`policy.go`, ported from codex's
-  computer_use.rs): every action targets an app; the app must be in
-  `computer.allow` config, or session-approved. `computer.deny` always wins.
-  Default-deny is on. The TUI installs the consent hook (v1: a transcript
-  note + the model surfaces the ask; an interactive approve-prompt is the
-  follow-up — no turn-pausing modal exists yet).
+- **Per-app policy** (`policy.go`, ported from codex's computer_use.rs):
+  every action targets an app. **Default is allow-all** — users build
+  blocklists (`computer.deny` config, or `/computer-use deny <app>`
+  in-session), not allowlists. `computer.deny` always wins (config and
+  session). `computer.allow` and `computer.defaultDeny: true` restore the
+  gated posture for anyone who wants it.
 - **Tool shape** — the same helper-call mini-language as browser_exec
   (`internal/tools/browser_lang.go`, now shared): `chrome_state`,
   `chrome_tabs`, `chrome_goto`, `chrome_new_tab`, `chrome_activate`,

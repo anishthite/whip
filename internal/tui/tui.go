@@ -54,8 +54,8 @@ var (
 
 // messages sent from the agent goroutine
 type textMsg string
-type toolStartMsg struct{ name, args string }
-type toolEndMsg struct{ name, result string }
+type toolStartMsg struct{ id, name, args string }
+type toolEndMsg struct{ id, name, result string }
 type steeredMsg string
 
 // goalFromContextMsg carries the model-formulated goal back from the
@@ -144,11 +144,14 @@ type model struct {
 	saved     int            // messages already persisted (index into agent.Messages)
 	snapshots map[int]string // workspace snapshot ref per turn-start index (mirrors the snapshots table)
 
-	hist    []string         // submitted inputs, for up/down recall
-	histIdx int              // len(hist) == not navigating
-	draft   string           // in-progress input saved while navigating history
-	lastUp  time.Time        // last ↑ keypress; repeat detection for history rollover
-	now     func() time.Time // test seam; defaults to time.Now
+	hist     []string         // submitted inputs, for up/down recall
+	pasteBuf string           // held paste text for the [Pasted ~N lines] placeholder (config collapsePaste)
+	histIdx  int              // len(hist) == not navigating
+	draft    string           // in-progress input saved while navigating history
+	lastUp   time.Time        // last ↑ keypress; repeat detection for history rollover
+	now      func() time.Time // test seam; defaults to time.Now
+
+	turnStart time.Time // when the in-flight turn began; zero when idle (busy line shows elapsed)
 
 	queue      []string // messages typed while busy, sent after the turn ends
 	queueSel   int      // selected queued message, -1 = none (not navigating)
@@ -157,8 +160,10 @@ type model struct {
 
 	goal       string // active /goal; the loop continues until GOAL_MET
 	goalRounds int    // continuation turns spent on the current goal
+	titled     bool   // an auto-title has been attempted for this session
 
 	mouseOn      bool   // runtime mouse-capture state (toggle with /mouse)
+	themeHow     string // how auto theme detection resolved (env var, OSC query, …) — captured at startup/theme change for /report; never re-queried
 	compactModel string // config model name for compaction summaries; "" = the built-in default
 	compactProv  string
 	effortX      int                       // screen column where the clickable ⚡ effort control starts
@@ -166,9 +171,16 @@ type model struct {
 	mcpMgr       *mcp.Manager              // MCP server connections; nil when none configured
 	mcpSeen      map[string]bool           // servers whose first settle was announced
 	lspMgr       *lsp.Manager              // LSP diagnostics source for write/edit tool output
+	// skillScan is the skills discovery seam (skills.Scan over DefaultDirs in
+	// the real model): a field so the context doctor can be tested against
+	// temp-dir skills instead of whatever the test machine happens to have.
+	skillScan func() []skills.Skill
 
 	irunner *interactiveRunner // installed on tools.InteractiveBash at startup
 	iactive *interactive       // in-flight interactive command; nil when idle
+
+	perms      permRules   // saved allow-always rules
+	permDialog *permDialog // open permission modal; the turn is paused on it
 
 	tasksFocus bool      // the tasks dock owns ↑/↓/enter/esc instead of the input
 	taskSel    int       // selected row in the dock (index into newest-first tasks)
@@ -221,16 +233,7 @@ func newInput() textarea.Model {
 
 // Run starts the interactive session. It returns the id of the session that
 // was active on exit ("" if nothing was said).
-func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string) (string, error) {
-	// Trust gate first: before whip reads a single file, ask whether this
-	// folder's contents may steer the model. Persisted per absolute path in
-	// ~/.whip/trusted.json (claude-code's per-project trust dialog).
-	if ok, err := checkTrust(); err != nil {
-		return "", err
-	} else if !ok {
-		return "", fmt.Errorf("folder not trusted")
-	}
-
+func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string, cautious bool) (string, error) {
 	ag, mn, pn, err := buildAgent(cfg, modelName, provName, sysPrompt)
 	if err != nil {
 		return "", err
@@ -264,6 +267,7 @@ func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string) (s
 		input: ti, spin: spinner.New(spinner.WithSpinner(spinner.Dot)), follow: true, saved: 1,
 		catalogs: config.LoadCatalogs(), mouseOn: mouseOn, now: time.Now, showThinking: showThinking,
 		compactModel: cfg.CompactModel, compactProv: cfg.CompactProvider,
+		skillScan: func() []skills.Skill { return skills.Scan(skills.DefaultDirs()...) },
 	}
 	m.applyCompactModel()
 	m.agent.CompactThreshold = compactThresholdFor(cfg)
@@ -308,6 +312,10 @@ func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string) (s
 	// computer-use: the per-app consent prompt — installed once, here, where
 	// the model exists (buildAgent is package-level and has no m).
 	tools.ComputerApprover = m.computerConsent
+	// Permission prompts are opt-in (--cautious); without it tools run free.
+	if cautious {
+		m.installPermGate()
+	}
 	if dir, derr := config.Dir(); derr == nil {
 		if st, serr := session.Open(dir + "/sessions.db"); serr == nil {
 			m.store = st
@@ -354,8 +362,9 @@ func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string) (s
 		enableClickWheelMouse(os.Stdout)
 		applyTmuxMouseFix()
 	}
-	// pick the glamour style that matches the pick/detection resolution
-	m.applyTheme(cfg.Theme)
+	// pick the glamour style that matches the pick/detection resolution;
+	// keep how detection resolved so /report can name the source
+	m.themeHow = m.applyTheme(cfg.Theme)
 	if m.cfgExtra == nil {
 		m.cfgExtra = map[string]string{}
 	}
@@ -487,6 +496,24 @@ func applyTmuxMouseFix() {
 		"#{||:#{alternate_on},#{pane_in_mode},#{mouse_all_flag}}", "send-keys -M", "copy-mode -M").Run()
 }
 
+// catalogLites converts llm model records into the catalog-cache shape.
+func catalogLites(infos []llm.ModelInfo) []config.ModelInfoLite {
+	lites := make([]config.ModelInfoLite, len(infos))
+	for i, mi := range infos {
+		lites[i] = config.ModelInfoLite{
+			ID:                  mi.ID,
+			ContextLength:       mi.ContextLength,
+			MaxCompletionTokens: mi.MaxCompletionTokens,
+			ReasoningEfforts:    mi.ReasoningEfforts,
+			InputModalities:     mi.InputModalities,
+		}
+		if mi.Pricing != nil {
+			lites[i].InPrice, lites[i].OutPrice, lites[i].CacheReadPrice = mi.Pricing.Rates()
+		}
+	}
+	return lites
+}
+
 // fetchCatalogs refreshes each provider's cached model list in the background
 // and sends the merged result to the UI. force bypasses the 24h TTL
 // (/model refresh) so newly announced models appear immediately.
@@ -507,7 +534,11 @@ func (m *model) fetchCatalogs(force bool) {
 		if c, ok := cats[name]; ok && !force && !c.Stale() && c.BaseURL == prov.BaseURL {
 			continue
 		}
-		key := prov.Key()
+		key, keyErr := prov.ResolveKey()
+		if keyErr != nil {
+			config.LogEvent("catalog.fetch", name+" skipped: "+keyErr.Error())
+			continue
+		}
 		if key == "" {
 			continue
 		}
@@ -519,20 +550,7 @@ func (m *model) fetchCatalogs(force bool) {
 			continue // keep any stale cache
 		}
 		config.LogEvent("catalog.fetch", fmt.Sprintf("%s ok: %d models", name, len(infos)))
-		models := make([]config.ModelInfoLite, len(infos))
-		for i, mi := range infos {
-			models[i] = config.ModelInfoLite{
-				ID:                  mi.ID,
-				ContextLength:       mi.ContextLength,
-				MaxCompletionTokens: mi.MaxCompletionTokens,
-				ReasoningEfforts:    mi.ReasoningEfforts,
-				InputModalities:     mi.InputModalities,
-			}
-			if mi.Pricing != nil {
-				models[i].InPrice, models[i].OutPrice, models[i].CacheReadPrice = mi.Pricing.Rates()
-			}
-		}
-		cats[name] = config.Catalog{FetchedAt: time.Now(), BaseURL: prov.BaseURL, Models: models}
+		cats[name] = config.Catalog{FetchedAt: time.Now(), BaseURL: prov.BaseURL, Models: catalogLites(infos)}
 		dirty = true
 	}
 	if dirty {
@@ -618,6 +636,7 @@ func (m *model) resume(id string) error {
 		m.agent.Effort = effort
 	}
 	m.sessionID = meta.ID
+	bashrun.SetMarkers(meta.ID, m.agent.Model)
 	m.saved = len(m.agent.Messages)
 	// Add this session's user messages to recall, skipping any already present
 	// from the global cross-session seed (resume runs after that seed).
@@ -713,6 +732,7 @@ func (m *model) persist() {
 			return
 		}
 		m.sessionID = id
+		bashrun.SetMarkers(id, m.agent.Model)
 		m.agent.Tasks().SetSessionID(id) // publish before Save so a settling subagent records
 		m.agent.SetSessionID(id)         // scopes the per-session memory file
 	}
@@ -746,6 +766,7 @@ func (m *model) setTheme(theme string) {
 		theme = "auto"
 	}
 	how := m.applyTheme(theme)
+	m.themeHow = how // explicit picks return "" — detection source no longer applies
 	m.cfg.Theme = theme
 	if theme == "auto" {
 		m.cfg.Theme = "" // auto persists as "" (omitted = auto-detect)
@@ -875,7 +896,7 @@ func buildAgent(cfg *config.Config, modelName, provName, sysPrompt string) (*age
 	// installed below (the model never touches an unapproved app silently).
 	ag.ComputerDisabled = cfg.Computer.Enabled != nil && !*cfg.Computer.Enabled
 	if !ag.ComputerDisabled {
-		defaultDeny := cfg.Computer.DefaultDeny == nil || *cfg.Computer.DefaultDeny
+		defaultDeny := cfg.Computer.DefaultDeny != nil && *cfg.Computer.DefaultDeny // default: allow-all
 		tools.ComputerPolicy = computer.NewPolicy(cfg.Computer.Allow, cfg.Computer.Deny, defaultDeny)
 	}
 	if !ag.BrowserDisabled && tools.Browser == nil {
@@ -919,6 +940,7 @@ const (
 	blockText      blockKind = iota // already-styled line(s): re-wrap on resize
 	blockAssistant                  // raw markdown: re-render through glamour
 	blockTool                       // raw tool result: collapsed preview, expandable
+	blockToolRun                    // a running tool call: verb line, collapses on completion
 )
 
 // toolPreviewLines is how many lines of a tool result show when collapsed.
@@ -937,7 +959,12 @@ const minRenderWidth = 8
 type block struct {
 	kind     blockKind
 	text     string
-	expanded bool // blockTool: show the full output (click / ctrl+e toggles)
+	expanded bool // blockTool/blockToolRun: show the full output (click / ctrl+e toggles)
+	// blockToolRun: the tool-call id this row tracks and whether it's still
+	// running — on completion the row collapses in place to one line.
+	toolID      string
+	toolRunning bool
+	toolFailed  bool
 	// y0/y1 are the block's line range in the last rendered content (set by
 	// refreshVP); used to map a mouse click to the block under it.
 	y0, y1 int
@@ -977,10 +1004,35 @@ func (b block) render(width int) string {
 		if b.expanded || len(lines) <= toolPreviewLines {
 			return wrap(dimStyle.Render("  "+strings.Join(lines, "\n  ")), width)
 		}
-		preview := strings.Join(lines[:toolPreviewLines], "\n  ")
-		out := dimStyle.Render("  " + preview)
+		preview := lines[:toolPreviewLines]
+		// An edit-style result carries a fenced diff at the tail; surface its
+		// -/+ lines in the collapsed preview so the change shows without
+		// expanding.
+		if strings.HasSuffix(lines[len(lines)-1], "```") {
+			var diffs []string
+			for _, l := range lines {
+				if strings.HasPrefix(l, "-") || strings.HasPrefix(l, "+") {
+					diffs = append(diffs, l)
+				}
+			}
+			if len(diffs) > 0 {
+				preview = append(preview, diffs...)
+			}
+		}
+		out := dimStyle.Render("  " + strings.Join(preview, "\n  "))
 		hint := fmt.Sprintf("\n  … +%d lines (ctrl+e or click to expand)", len(lines)-toolPreviewLines)
 		return wrap(out+dimStyle.Render(hint), width)
+	case blockToolRun:
+		// While running, the verb line shows in full. On completion the same
+		// block collapses in place to one line (red on failure); ctrl+e expands.
+		if b.toolRunning || b.expanded {
+			return wrap(b.text, width)
+		}
+		line := ansi.Truncate(b.text, width, "…")
+		if b.toolFailed {
+			return wrap(errStyle.Render(line), width)
+		}
+		return wrap(dimStyle.Render(line), width)
 	default:
 		return wrap(b.text, width)
 	}
@@ -988,7 +1040,7 @@ func (b block) render(width int) string {
 
 // expand toggles a tool block and returns whether it changed.
 func (b *block) toggle() bool {
-	if b.kind != blockTool {
+	if b.kind != blockTool && b.kind != blockToolRun {
 		return false
 	}
 	b.expanded = !b.expanded
@@ -1343,6 +1395,29 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case titleMsg:
+		// only fill a title still at its auto placeholder (a /rename wins)
+		if m.store != nil && m.sessionID != "" {
+			if meta, _, err := m.store.Load(m.sessionID); err == nil {
+				first := ""
+				for _, msg := range m.agent.Messages {
+					if msg.Role == "user" && msg.Authored {
+						first = truncLine(strings.Join(strings.Fields(msg.TextContent()), " "), 64)
+						break
+					}
+				}
+				if meta.Title == first {
+					_ = m.store.SetTitle(m.sessionID, msg.title)
+					m.append(dimStyle.Render("◎ session titled: " + msg.title))
+				}
+			}
+		}
+		return m, nil
+
+	case permRequest:
+		m.permDialog = &permDialog{req: msg.req, reply: msg.reply}
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.key(msg)
 
@@ -1454,15 +1529,31 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				args = label
 			}
 		}
-		// full args, wrapped at render time like every other block — no
-		// truncation: the command being run must always be fully visible
-		m.append(toolStyle.Render("⚒ "+msg.name+" ") + dimStyle.Render(args))
+		// a running row: icon + present-participle verb + full args (the
+		// command being run is always fully visible). On toolEndMsg the same
+		// block collapses in place to one line.
+		row := toolStyle.Render("⚒ "+toolVerb(msg.name)+" ") + dimStyle.Render(args)
+		m.blocks = append(m.blocks, block{kind: blockToolRun, text: row, toolID: msg.id, toolRunning: true})
+		m.refreshVP()
 		return m, nil
 
 	case toolEndMsg:
 		// store the raw result; render collapses to a preview (ctrl+e /
 		// click expands) and re-wraps on resize
 		m.appendRaw(blockTool, msg.result)
+		// collapse the matching running row in place: full args+result when
+		// expanded, one dim line (red on failure) otherwise
+		for i := len(m.blocks) - 1; i >= 0; i-- {
+			b := &m.blocks[i]
+			if b.kind == blockToolRun && b.toolRunning && b.toolID == msg.id {
+				b.toolRunning = false
+				b.toolFailed = strings.HasPrefix(msg.result, "Error:")
+				b.text = toolStyle.Render("⚒ "+msg.name+" ") + dimStyle.Render(firstLine(msg.result))
+				b.stale = true
+				break
+			}
+		}
+		m.refreshVP()
 		return m, nil
 
 	case meEditedMsg:
@@ -1600,6 +1691,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		m.cancel = nil
 		m.interrupt1 = false
+		m.turnStart = time.Time{}
+		m.maybeTitle()
 		// Cancellation arrives wrapped from the in-flight http request
 		// ("Post ...: context canceled"), so identity comparison misses it —
 		// which would strand the queue instead of draining it.
@@ -1656,6 +1749,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateCatalogs(msg)
 		return m, nil
 
+	case authResultMsg:
+		m.applyAuthResult(msg)
+		return m, nil
+
 	case noticeMsg:
 		m.append(dimStyle.Render(string(msg)))
 		return m, nil
@@ -1704,7 +1801,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case mcp.StatusReady:
 					m.append(dimStyle.Render(fmt.Sprintf("⚡ mcp: %s ready (%d tools)", srv.Name, srv.Tools)))
 				case mcp.StatusFailed:
-					m.append(errStyle.Render(fmt.Sprintf("✗ mcp: %s failed: %s (/mcp %s reconnect)", srv.Name, srv.Err, srv.Name)))
+					line := fmt.Sprintf("✗ mcp: %s failed: %s", srv.Name, srv.Err)
+					if srv.Source != "" {
+						line += " (" + srv.Source + ")"
+					}
+					m.append(errStyle.Render(line + fmt.Sprintf(" (/mcp %s reconnect)", srv.Name)))
 				case mcp.StatusDisabled:
 					m.append(dimStyle.Render(fmt.Sprintf("○ mcp: %s disabled", srv.Name)))
 				}
@@ -1770,6 +1871,10 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.iactive != nil {
 		return m.iactiveKey(msg)
 	}
+	if m.permDialog != nil {
+		m.permKey(msg)
+		return m, nil
+	}
 	if m.palette != nil {
 		return m.paletteKey(msg)
 	}
@@ -1818,6 +1923,21 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.taskVP != nil {
 		return m.taskViewKey(msg)
 	}
+	// Paste collapse (opt-in via config collapsePaste): a multi-line bracketed
+	// paste lands as a [Pasted ~N lines] placeholder in the input instead of
+	// spraying the textarea; the real text is held in pasteBuf and swapped in
+	// at submit. Off by default — a paste you can't see is a paste you can't
+	// trust.
+	if msg.Paste && m.cfg != nil && m.cfg.CollapsePaste != nil && *m.cfg.CollapsePaste {
+		if n := strings.Count(string(msg.Runes), "\n"); n >= 2 {
+			m.pasteBuf = string(msg.Runes)
+			m.input.SetValue(m.input.Value() + fmt.Sprintf("[Pasted ~%d lines]", n+1))
+			m.input.CursorEnd()
+			m.growInput()
+			return m, nil
+		}
+	}
+
 	switch msg.Type {
 	case tea.KeyCtrlT:
 		// focus the tasks dock (or unfocus it) — the persistent strip above
@@ -1866,8 +1986,13 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Dismissing UI takes priority and only arms the window.
 		dismissed := true
 		switch {
-		case m.namePrompt != nil: // cancel the inline fork/rename prompt
+		case m.namePrompt != nil: // cancel the inline fork/rename/auth prompt
+			masked := m.namePrompt.mask
 			m.closeNamePrompt()
+			if masked { // the draft stash must not record a key into history
+				m.escClr = false
+				return m, nil
+			}
 		case m.menu != nil:
 			if m.menu.cyc { // tab cycling previewed candidates: revert the input
 				m.input.SetValue(m.menu.base)
@@ -2091,13 +2216,20 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		text := strings.TrimSpace(m.input.Value())
+		// a collapsed paste swaps its real text back in at submit
+		if m.pasteBuf != "" {
+			text = strings.Replace(text, strings.TrimSpace(fmt.Sprintf("[Pasted ~%d lines]", strings.Count(m.pasteBuf, "\n")+1)), strings.TrimSpace(m.pasteBuf), 1)
+			m.pasteBuf = ""
+		}
 		if m.busy {
 			switch {
 			// settings commands don't touch the turn — run them now instead of
 			// queueing them as messages for the model
 			case text != "" && busyCmd(text):
-				m.hist = append(m.hist, text)
-				m.histIdx = len(m.hist)
+				if !strings.HasPrefix(text, "/auth ") { // keys stay out of ↑-recallable history
+					m.hist = append(m.hist, text)
+					m.histIdx = len(m.hist)
+				}
 				m.input.Reset()
 				m.menu = nil
 				return m.command(text)
@@ -2134,8 +2266,13 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.input.Reset()
 		m.menu = nil
-		m.hist = append(m.hist, text)
-		m.histIdx = len(m.hist)
+		// /auth with an inline key is kept out of input history: the key would
+		// otherwise be ↑-recallable and rendered in the clear. The masked
+		// prompt (bare /auth) is the recommended path.
+		if !strings.HasPrefix(text, "/auth ") {
+			m.hist = append(m.hist, text)
+			m.histIdx = len(m.hist)
+		}
 		m.draft = ""
 		if strings.HasPrefix(text, "/") {
 			return m.command(text)
@@ -2176,6 +2313,28 @@ func (m *model) nowFn() time.Time {
 		return m.now()
 	}
 	return time.Now()
+}
+
+// busyStats renders the busy line's live counters: elapsed time since the
+// turn started, session tokens so far, and the share of the advertised
+// context window. Returns "" when idle (turnStart zero).
+func (m *model) busyStats() string {
+	if m.turnStart.IsZero() {
+		return ""
+	}
+	d := m.nowFn().Sub(m.turnStart)
+	if d < 0 {
+		d = 0
+	}
+	elapsed := d.Round(time.Second)
+	stats := fmt.Sprintf(" %d:%02d", int(elapsed.Minutes()), int(elapsed.Seconds())%60)
+	if u := m.agent.Usage(); u.PromptTokens > 0 || u.CompletionTokens > 0 {
+		stats += fmt.Sprintf(" · %s tok", fmtTok(u.PromptTokens+u.CompletionTokens))
+	}
+	if m.agent.ContextLimit > 0 {
+		stats += fmt.Sprintf(" · %d%%", agent.EstimateTokens(m.agent.Messages)*100/m.agent.ContextLimit)
+	}
+	return stats
 }
 
 // histPrev/histNext recall submitted inputs with the arrow keys.
@@ -2293,7 +2452,10 @@ func (m *model) applyCompactModel() {
 func clientForProvider(prov config.Provider, name string, maxRetries int) (llm.Client, error) {
 	switch prov.API {
 	case "", "openai-completions":
-		key := prov.Key()
+		key, err := prov.ResolveKey()
+		if err != nil {
+			return nil, err
+		}
 		if key == "" {
 			return nil, fmt.Errorf("no API key for provider %q (set apiKey/apiKeyEnv in ~/.whip/config.json)", name)
 		}
@@ -2790,6 +2952,7 @@ func (m *model) submitGoal(text string) (tea.Model, tea.Cmd) {
 
 func (m *model) submitTurn(text string, authored bool) (tea.Model, tea.Cmd) {
 	m.busy = true
+	m.turnStart = m.nowFn()
 	prepared, parts := m.prepareTurn(text)
 	userMsgIdx := len(m.agent.Messages) // where Turn will append this message
 	// Snapshot the pre-turn workspace so a rewind past this turn restores the
@@ -2870,11 +3033,11 @@ func (m *model) submitTurn(text string, authored bool) (tea.Model, tea.Cmd) {
 		events := agent.Events{
 			OnText:  onText,
 			OnThink: onThink,
-			OnToolStart: func(n, a string) {
+			OnToolStart: func(id, n, a string) {
 				flush()
-				send(toolStartMsg{n, a})
+				send(toolStartMsg{id, n, a})
 			},
-			OnToolEnd: func(n, r string) { send(toolEndMsg{n, r}) },
+			OnToolEnd: func(id, n, r string) { send(toolEndMsg{id, n, r}) },
 			OnSteer: func(s string) {
 				flush()
 				send(steeredMsg(s))
@@ -2926,7 +3089,9 @@ func busyCmd(text string) bool {
 		return false
 	}
 	switch fields[0] {
-	case "/help", "/theme", "/mouse", "/effort", "/tasks", "/cd", "/pwd":
+	case "/help", "/theme", "/mouse", "/effort", "/tasks", "/cd", "/pwd", "/report":
+		return true
+	case "/auth": // must run now even while busy: an inline key queued as a chat message would be sent to the model
 		return true
 	case "/goal": // status, clear, and rounds are settings; resume/<text> submit turns
 		return len(fields) == 1 || fields[1] == "clear" || fields[1] == "rounds"
@@ -3195,9 +3360,12 @@ func (m *model) command(text string) (tea.Model, tea.Cmd) {
 		m.openPicker()
 	case "/context-doctor":
 		m.append(m.doctorReport())
+	case "/report":
+		m.append(m.reportBlock())
 	case "/help":
-		m.append(dimStyle.Render(
-			"/model <name> [provider] — switch model (any provider-catalog model works; refresh pulls new announcements)\n/context-doctor — audit what a fresh session injects (skills, MCP, tool schemas) and its token cost\n/mcp [name] [reconnect|enable|disable] — MCP servers: status, reconnect, toggle\n/compact [model] [provider]|off — compact now, or pick the compaction model (off restores the default); retry undoes the last compaction, log lists them; compaction level: ctrl+p › Compaction level\n/mouse — toggle mouse capture (on = wheel scroll + clicks, drag to copy)\n/theme [light|dark|auto] — color scheme (bare opens the switcher)\n/tasks [id] — background subagents: focus the dock, or open one subagent's live view (ctrl+t toggles dock focus)\n/resume [id] — resume a previous session\n/fork [name] — copy this conversation into a new session (pick a point in the rewind picker with f)\n/rename [title] — retitle this session\n/goal <text> — keep working until the goal is met (resume | clear | rounds <n>|default [--global])\n/goal-from-context [n] — formulate a goal from the last n messages (default 8) and work until it's met\n/clear — reset conversation\n/memory [n] [session] — saved memories: list what's injected each turn, mark entry n done\n/me — edit your standing instructions (~/.whip/me.md) in $EDITOR\n/schedule @every 10m|<@at time> <prompt> — schedule a wakeup turn; list | cancel <n>\n/cd [dir] — change working directory (bare prints it)\n/pwd — print working directory\n!<cmd> — run a shell command locally; output lands in the transcript and the conversation\n/quit — exit\ntab — complete · ctrl+k — clear the conversation · ctrl+t — focus the subagents dock (↑/↓ select, enter opens, esc backs out) · ctrl+o — toggle thinking tokens · ctrl+e — expand the last tool result · ctrl+j / shift+enter — newline · ctrl+v — paste image · esc — interrupt the agent · esc esc (idle) — rewind the conversation (↑/↓ browse, enter rewinds, f forks) · while busy with queued messages: ↑/↓ select, del removes · PgUp/PgDn — scroll · wheel — scroll · drag — select/copy text · ctrl+c ctrl+c — quit"))
+		m.append(dimStyle.Render(helpText()))
+	case "/auth":
+		m.authCommand(fields[1:])
 	case "/model":
 		if len(fields) < 2 {
 			m.openModelPicker()
@@ -3217,7 +3385,17 @@ func (m *model) command(text string) (tea.Model, tea.Cmd) {
 		if len(fields) > 2 {
 			prov = fields[2]
 		}
-		m.switchModel(fields[1], prov)
+		name := fields[1]
+		resolved, ok, alts := resolveModelFuzzy(m.cfg, name)
+		if !ok {
+			if len(alts) > 0 {
+				m.append(errStyle.Render(fmt.Sprintf("ambiguous model %q — did you mean: %s?", name, strings.Join(alts, ", "))))
+				return m, nil
+			}
+			m.append(errStyle.Render("unknown model " + name))
+			return m, nil
+		}
+		m.switchModel(resolved, prov)
 	default:
 		m.append(errStyle.Render("unknown command " + fields[0]))
 	}
@@ -3362,6 +3540,9 @@ func (m *model) View() string {
 	if m.iactive != nil {
 		b.WriteString("\n" + m.interactiveView() + "\n")
 	}
+	if m.permDialog != nil {
+		b.WriteString("\n" + m.permView() + "\n")
+	}
 	if m.busy {
 		hint := " thinking… (enter queues · /theme /mouse /effort run now · esc interrupts · ctrl+c ctrl+c interrupts)"
 		if m.iactive != nil {
@@ -3369,7 +3550,7 @@ func (m *model) View() string {
 		} else if m.interrupt1 {
 			hint = " thinking… (esc or ctrl+c again to interrupt)"
 		}
-		b.WriteString("\n" + m.spin.View() + dimStyle.Render(hint) + "\n")
+		b.WriteString("\n" + m.spin.View() + dimStyle.Render(m.busyStats()+hint) + "\n")
 	}
 	if len(m.queue) > 0 {
 		nav := ""
@@ -3398,8 +3579,17 @@ func (m *model) View() string {
 	if m.iactive == nil {
 		if m.namePrompt != nil {
 			b.WriteString(m.namePrompt.label + " ")
+			if m.namePrompt.mask {
+				// Secrets never echo: render the mask instead of the input's
+				// live view (which would show the key in the clear). The "┃ "
+				// prompt matches how the textarea renders its own first line.
+				b.WriteString("┃ " + m.namePrompt.maskedValue(m.input.Value()))
+			} else {
+				b.WriteString(m.input.View())
+			}
+		} else {
+			b.WriteString(m.input.View())
 		}
-		b.WriteString(m.input.View())
 	}
 	if m.quit1 {
 		// first idle ctrl+c armed the quit; make the second press discoverable
