@@ -472,12 +472,12 @@ auto-installing servers.
 
 ## Skills
 
-`internal/skills/skills.go` — scans `.agents/skills/*/SKILL.md` (project) and
-`~/.whip/skills/` (user) for a name+description frontmatter block, injected
-into the system prompt as an `<available_skills>` catalog in the Agent Skills
-spec format (`<skill><name>/<description>/<location>`, XML-escaped). The model
-reads a SKILL.md with its own read tool when relevant. Skills re-index every
-turn, so new ones load without restarting.
+`internal/skills/skills.go` — scans `.agents/skills/*/SKILL.md` (project),
+`~/.whip/skills/`, and `~/.agents/skills/` (user) for a name+description
+frontmatter block, injected into the system prompt as an `<available_skills>`
+catalog in the Agent Skills spec format (`<skill><name>/<description>/<location>`,
+XML-escaped). The model reads a SKILL.md with its own read tool when relevant.
+Skills re-index every turn, so new ones load without restarting.
 
 **Spec compliance** (agentskills.io, matching pi's `core/skills.ts`): name
 validated (≤64 chars, lowercase a-z/0-9/hyphens, no leading/trailing/double
