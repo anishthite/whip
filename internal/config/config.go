@@ -382,6 +382,9 @@ func (c *Config) Resolve(model, provider string) (Provider, Model, string, error
 	if model == "" {
 		model = c.DefaultModel
 	}
+	if provider == "" {
+		provider = c.DefaultProvider
+	}
 	m, ok := c.Models[model]
 	if !ok {
 		// Catalog fallback: a provider-advertised model needs no config entry;
@@ -391,9 +394,6 @@ func (c *Config) Resolve(model, provider string) (Provider, Model, string, error
 		if err != nil {
 			return Provider{}, Model{}, "", err
 		}
-	}
-	if provider == "" {
-		provider = c.DefaultProvider
 	}
 	if provider == "" && len(m.Providers) > 0 {
 		provider = m.Providers[0]
