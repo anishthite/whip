@@ -18,8 +18,8 @@ import (
 type Events struct {
 	OnText      func(delta string)               // assistant text as it streams
 	OnThink     func(delta string)               // reasoning/thinking tokens as they stream
-	OnToolStart func(id, name, args string)   // a tool call is about to run
-	OnToolEnd   func(id, name, result string) // a tool call finished
+	OnToolStart func(id, name, args string)      // a tool call is about to run
+	OnToolEnd   func(id, name, result string)    // a tool call finished
 	OnSteer     func(text string)                // a steered message was injected
 	OnCompact   func(took, kept int)             // context was auto-compacted (messages removed/kept)
 	OnCompacted func(summary string, cutoff int) // a compaction ran; record it (raw log survives)
@@ -49,6 +49,10 @@ type Agent struct {
 	// CompactThreshold is the fraction of ContextLimit at which Turn compacts
 	// proactively; 0 uses defaultCompactThreshold.
 	CompactThreshold float64
+
+	// MaxTurns caps the tool-call loop (rounds of model→tools→model) so a
+	// scripted run can't run away. 0 = uncapped (the TUI default).
+	MaxTurns int
 
 	mu        sync.Mutex
 	pending   []pendingSteer // steered user messages awaiting injection
@@ -279,7 +283,12 @@ func (a *Agent) turn(ctx context.Context, input string, parts []llm.ContentPart,
 	a.msgsMu.Lock()
 	a.Messages = append(a.Messages, msg)
 	a.msgsMu.Unlock()
+	rounds := 0
 	for {
+		if a.MaxTurns > 0 && rounds >= a.MaxTurns {
+			return "", fmt.Errorf("max turns (%d) reached — the model kept calling tools; re-run with a higher -max-turns or a more specific prompt", a.MaxTurns)
+		}
+		rounds++
 		if err := a.maybeCompact(ctx, ev); err != nil {
 			return "", err
 		}
