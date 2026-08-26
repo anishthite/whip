@@ -1753,6 +1753,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyAuthResult(msg)
 		return m, nil
 
+	case codexLoginResultMsg:
+		m.applyCodexLoginResult(msg.err)
+		return m, nil
+
 	case noticeMsg:
 		m.append(dimStyle.Render(string(msg)))
 		return m, nil

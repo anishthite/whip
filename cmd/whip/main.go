@@ -63,7 +63,7 @@ func main() {
 		return
 	}
 
-	// `whip login codex` — sign in to a ChatGPT subscription from Whip.
+	// `whip login codex` — compatible alias for `whip auth codex`.
 	if flag.NArg() > 0 && flag.Arg(0) == "login" {
 		if err := loginCLI(flag.Args()[1:]); err != nil {
 			fmt.Fprintln(os.Stderr, "whip:", err)
@@ -117,7 +117,7 @@ func main() {
 		return
 	}
 
-	// `whip auth ...` — provider key onboarding (openrouter).
+	// `whip auth ...` — provider onboarding (OpenRouter keys or Codex OAuth).
 	if flag.NArg() > 0 && flag.Arg(0) == "auth" {
 		if err := authCLI(flag.Args()[1:]); err != nil {
 			fmt.Fprintln(os.Stderr, "whip:", err)

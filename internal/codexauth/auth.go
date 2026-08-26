@@ -26,7 +26,10 @@ const (
 )
 
 var (
-	ErrLoginRequired          = errors.New("codex authentication not found; run whip login codex, pi /login openai-codex, or codex login")
+	ErrLoginRequired = errors.New(
+		"codex authentication not found; run a codex login with whip auth codex " +
+			"(or whip login codex), pi /login openai-codex, or codex login",
+	)
 	ErrDeviceLoginUnsupported = errors.New("device-code login is not enabled for this Codex account")
 	ErrDeviceLoginTimeout     = errors.New("device login timed out after 15 minutes")
 )
@@ -484,15 +487,15 @@ func (s *Source) refresh(ctx context.Context, c *candidate) error {
 	hr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := s.httpClient().Do(hr)
 	if err != nil {
-		return errors.New("could not refresh codex login; run whip login codex")
+		return errors.New("could not refresh codex login; run whip auth codex (or whip login codex)")
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return errors.New("could not refresh codex login; run whip login codex")
+		return errors.New("could not refresh codex login; run whip auth codex (or whip login codex)")
 	}
 	var out tokenResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil || out.AccessToken == "" {
-		return errors.New("could not refresh codex login; run whip login codex")
+		return errors.New("could not refresh codex login; run whip auth codex (or whip login codex)")
 	}
 	c.access = out.AccessToken
 	if out.RefreshToken != "" {
@@ -504,10 +507,10 @@ func (s *Source) refresh(ctx context.Context, c *candidate) error {
 	c.expiresAt = expiryFromDuration(out.ExpiresIn, s.clock())
 	c.fillJWTClaims()
 	if c.accountID == "" {
-		return errors.New("could not determine codex account; run whip login codex")
+		return errors.New("could not determine codex account; run whip auth codex (or whip login codex)")
 	}
 	if c.expiresAt.IsZero() {
-		return errors.New("could not determine codex token expiry; run whip login codex")
+		return errors.New("could not determine codex token expiry; run whip auth codex (or whip login codex)")
 	}
 	if err := c.save(s.clock()); err != nil {
 		return fmt.Errorf("save refreshed codex login: %w", err)

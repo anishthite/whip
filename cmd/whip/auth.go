@@ -17,10 +17,11 @@ import (
 	"github.com/context-labs/whip/internal/llm"
 )
 
-// authCLI implements `whip auth …`: turn a provider API key into a ready
-// provider entry + pre-fetched model catalog, so `/model` just works.
+// authCLI implements `whip auth …`: turn provider credentials into a ready
+// provider route, so `/model` works immediately after sign-in.
 //
 //	whip auth openrouter [--env] [<key>]
+//	whip auth codex
 //
 // The key comes from (first hit): the positional arg, OPENROUTER_API_KEY in
 // the environment, or a masked prompt. It is validated against the live
@@ -33,13 +34,15 @@ import (
 // interactive terminal we offer to append the export to the shell rc file.
 func authCLI(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: whip auth <provider> [<key>]   (providers: openrouter)")
+		return errors.New("usage: whip auth <provider> [<key>]   (providers: openrouter, codex)")
 	}
 	switch args[0] {
 	case "openrouter":
 		return authOpenRouterCLI(args[1:])
+	case "codex":
+		return authCodexCLI(args[1:])
 	default:
-		return fmt.Errorf("unknown provider %q (supported: openrouter)", args[0])
+		return fmt.Errorf("unknown provider %q (supported: openrouter, codex)", args[0])
 	}
 }
 

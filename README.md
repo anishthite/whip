@@ -57,34 +57,17 @@ install script above.
 ## Codex subscription
 
 Whip can use an existing ChatGPT/Codex subscription instead of an API key.
-Run `whip login codex` and follow the displayed URL and one-time code, then
-configure the provider explicitly:
-
-```json
-{
-  "providers": {
-    "codex": {
-      "name": "Codex",
-      "baseUrl": "https://chatgpt.com/backend-api",
-      "api": "openai-codex-responses",
-      "auth": "codex"
-    }
-  },
-  "models": {
-    "gpt-5.4": {
-      "providers": ["codex"],
-      "context": 272000,
-      "maxOut": 128000
-    }
-  }
-}
-```
+Run `whip auth codex` (or the compatible `whip login codex`) and follow the
+displayed URL and one-time code. On approval, Whip saves the login and adds
+`gpt-5.4 @ codex` to `/model` immediately. The same flow is available from an
+active session with `/auth codex`.
 
 The login is saved in Codex-compatible `~/.codex/auth.json`; an existing Codex
 CLI login or Pi login is also detected. Expiring tokens refresh locally and
 are never printed or added to conversations. This provider has no compatible
-model catalog, so set `context` and `maxOut` explicitly. OAuth credentials are
-only sent to `https://chatgpt.com/backend-api`.
+model catalog, so Whip writes the Codex route's authoritative `context` and
+`maxOut` limits (`272000` / `128000`). OAuth credentials are only sent to
+`https://chatgpt.com/backend-api`.
 
 ## First things to try
 

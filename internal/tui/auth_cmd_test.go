@@ -44,11 +44,64 @@ func TestAuthCommandUsageAndUnknownProvider(t *testing.T) {
 	m.authCommand(nil)
 	m.authCommand([]string{"anthropic"})
 	out := m.transcriptText()
-	if !strings.Contains(out, "usage: /auth openrouter") {
+	if !strings.Contains(out, "usage: /auth openrouter") || !strings.Contains(out, "/auth codex") {
 		t.Errorf("bare /auth should print usage:\n%s", out)
 	}
 	if !strings.Contains(out, "unknown provider anthropic") {
 		t.Errorf("unknown provider should be rejected:\n%s", out)
+	}
+}
+
+func TestAuthCommandCodexUsage(t *testing.T) {
+	m := authTestModel(t)
+	m.authCommand([]string{"codex", "unexpected"})
+	if out := m.transcriptText(); !strings.Contains(out, "usage: /auth codex") {
+		t.Errorf("codex with arguments should print usage:\n%s", out)
+	}
+}
+
+func TestCodexLoginResultConfiguresAndMakesModelPickable(t *testing.T) {
+	m := authTestModel(t)
+	m.busy = true
+	m.cancel = func() {}
+	m.applyCodexLoginResult(nil)
+
+	if m.busy || m.cancel != nil {
+		t.Fatal("completed Codex login should clear its busy state")
+	}
+	p, ok := m.cfg.Providers[config.CodexProviderName]
+	if !ok || p.Auth != "codex" {
+		t.Fatalf("Codex provider was not configured: %+v", p)
+	}
+	m.openModelPicker()
+	if m.mpicker == nil {
+		t.Fatal("Codex login should make the model picker available")
+	}
+	var found bool
+	for _, item := range m.mpicker.items {
+		if item.model == config.CodexDefaultModel && item.provider == config.CodexProviderName {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("%s @ %s missing from picker: %+v", config.CodexDefaultModel, config.CodexProviderName, m.mpicker.items)
+	}
+	if out := m.transcriptText(); !strings.Contains(out, "Codex configured") {
+		t.Errorf("success should be reported:\n%s", out)
+	}
+}
+
+func TestCodexLoginResultFailureLeavesRouteUntouched(t *testing.T) {
+	m := authTestModel(t)
+	m.applyCodexLoginResult(errors.New("device login rejected"))
+	if _, ok := m.cfg.Providers[config.CodexProviderName]; ok {
+		t.Fatal("failed Codex login must not configure a provider")
+	}
+	if _, ok := m.cfg.Models[config.CodexDefaultModel]; ok {
+		t.Fatal("failed Codex login must not add a model route")
+	}
+	if out := m.transcriptText(); !strings.Contains(out, "Codex login failed") {
+		t.Errorf("failure should be reported:\n%s", out)
 	}
 }
 

@@ -64,7 +64,7 @@ func TestBuildAgentCodexAuthGivesLoginHint(t *testing.T) {
 		Models: map[string]config.Model{"gpt-5.4": {Providers: []string{"codex"}}},
 	}
 	_, _, _, err := buildAgent(cfg, "", "", "system")
-	if err == nil || !strings.Contains(err.Error(), "codex login") {
+	if err == nil || !strings.Contains(err.Error(), "whip auth codex") {
 		t.Fatalf("error = %v, want login hint", err)
 	}
 }

@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"github.com/context-labs/whip/internal/codexauth"
+	"github.com/context-labs/whip/internal/config"
 )
 
 func TestLoginCodexShowsDeviceInstructions(t *testing.T) {
+	t.Setenv("WHIP_HOME", t.TempDir())
 	expires := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -36,7 +38,13 @@ func TestLoginCodexShowsDeviceInstructions(t *testing.T) {
 		t.Fatal(err)
 	}
 	printed := out.String()
-	for _, want := range []string{srv.URL + "/codex/device", "ABCD-1234", "ctrl+c", "saved to ~/.codex/auth.json"} {
+	for _, want := range []string{
+		srv.URL + "/codex/device",
+		"ABCD-1234",
+		"ctrl+c",
+		"saved to ~/.codex/auth.json",
+		"gpt-5.4 @ codex",
+	} {
 		if !strings.Contains(printed, want) {
 			t.Fatalf("login output missing %q:\n%s", want, printed)
 		}
@@ -44,10 +52,27 @@ func TestLoginCodexShowsDeviceInstructions(t *testing.T) {
 	if strings.Contains(printed, "new-access") || strings.Contains(printed, "new-refresh") {
 		t.Fatalf("login output leaked a token:\n%s", printed)
 	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.Providers[config.CodexProviderName]; !ok {
+		t.Fatal("successful login did not configure the codex provider")
+	}
+	route := cfg.Models[config.CodexDefaultModel]
+	if len(route.Providers) != 1 || route.Providers[0] != config.CodexProviderName {
+		t.Fatalf("successful login did not configure the codex model route: %+v", route)
+	}
 }
 
 func TestLoginCLIUsage(t *testing.T) {
 	if err := loginCLI([]string{"openai"}); err == nil || err.Error() != "usage: whip login codex" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestAuthCodexCLIUsage(t *testing.T) {
+	if err := authCodexCLI([]string{"unexpected"}); err == nil || err.Error() != "usage: whip auth codex" {
 		t.Fatalf("error = %v", err)
 	}
 }

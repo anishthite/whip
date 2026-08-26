@@ -2,20 +2,20 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/context-labs/whip/internal/codexauth"
 	"github.com/context-labs/whip/internal/config"
 	"github.com/context-labs/whip/internal/llm"
 )
 
-// /auth <provider> [key] turns a pasted API key into a working provider
-// without leaving the session: the key is validated against the provider's
-// live /models, the provider entry is upserted into ~/.whip/config.json
-// (guarded atomic save), and the model catalog is refreshed so /model lists
-// the new catalog immediately. OpenRouter is the first (and ponytail: only,
-// until a second provider wants one) supported provider.
+// /auth <provider> starts the provider's login flow without leaving the
+// session. OpenRouter validates a pasted API key and pre-fetches its catalog;
+// Codex runs device-code OAuth then registers its fixed model route. Both save
+// the provider entry before reporting success, so /model can use it at once.
 //
 // The bare form (/auth openrouter) repurposes the input box as a masked
 // one-shot prompt — the same namePrompt machinery as /fork and /rename, with
@@ -23,15 +23,29 @@ import (
 
 func (m *model) authCommand(args []string) {
 	if len(args) == 0 {
-		m.append(dimStyle.Render("usage: /auth openrouter [key] — paste a key, or bare to type it invisibly (get one at https://openrouter.ai/keys)"))
+		m.append(dimStyle.Render(
+			"usage: /auth openrouter [key] | /auth codex — " +
+				"OpenRouter accepts a masked key; Codex opens a device login",
+		))
 		return
 	}
-	if args[0] != "openrouter" {
-		m.append(errStyle.Render("unknown provider " + args[0] + " (supported: openrouter)"))
-		return
+	switch args[0] {
+	case "codex":
+		if len(args) != 1 {
+			m.append(errStyle.Render("usage: /auth codex"))
+			return
+		}
+		m.authCodex()
+	case "openrouter":
+		m.authOpenRouterCommand(args[1:])
+	default:
+		m.append(errStyle.Render("unknown provider " + args[0] + " (supported: openrouter, codex)"))
 	}
-	if len(args) > 1 {
-		m.authOpenRouter(config.TrimKey(strings.Join(args[1:], "")), false)
+}
+
+func (m *model) authOpenRouterCommand(args []string) {
+	if len(args) > 0 {
+		m.authOpenRouter(config.TrimKey(strings.Join(args, "")), false)
 		return
 	}
 	m.openNamePrompt("🔑 openrouter key (masked, enter to save, esc cancels):", "", func(key string) {
@@ -43,6 +57,59 @@ func (m *model) authCommand(args []string) {
 		m.authOpenRouter(key, false)
 	})
 	m.namePrompt.mask = true
+}
+
+// codexLoginResultMsg carries a completed device-code login back to the UI
+// goroutine. Credentials were written by codexauth; the UI commits the Whip
+// route only after that succeeds.
+type codexLoginResultMsg struct{ err error }
+
+func (m *model) authCodex() {
+	if m.busy {
+		m.append(errStyle.Render("/auth codex needs an idle session; wait for the current turn first"))
+		return
+	}
+	if m.prog == nil {
+		return // tests drive applyCodexLoginResult directly
+	}
+
+	m.append(dimStyle.Render("starting Codex device login…"))
+	ctx, cancel := context.WithCancel(context.Background())
+	m.busy = true
+	m.cancel = cancel
+	m.turnStart = time.Now()
+	p := m.prog
+	go func() {
+		err := (&codexauth.Source{}).DeviceLogin(ctx, func(code codexauth.DeviceCode) {
+			p.Send(noticeMsg(fmt.Sprintf(
+				"Codex sign-in: open %s and enter code %s. Press esc to cancel.",
+				code.VerificationURL,
+				code.UserCode,
+			)))
+		})
+		p.Send(codexLoginResultMsg{err: err})
+	}()
+}
+
+func (m *model) applyCodexLoginResult(err error) {
+	m.busy = false
+	m.cancel = nil
+	m.interrupt1 = false
+	m.turnStart = time.Time{}
+	if errors.Is(err, context.Canceled) {
+		m.append(dimStyle.Render("Codex login cancelled"))
+		return
+	}
+	if err != nil {
+		m.append(errStyle.Render("Codex login failed: " + err.Error()))
+		return
+	}
+	m.cfg.UpsertCodex()
+	if err := m.cfg.Save(); err != nil {
+		m.append(errStyle.Render("config save failed: " + err.Error()))
+		return
+	}
+	m.append(dimStyle.Render("✓ Codex configured — gpt-5.4 @ codex is ready in /model"))
 }
 
 // authResultMsg carries a finished key validation back to the UI goroutine.

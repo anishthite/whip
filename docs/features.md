@@ -163,10 +163,13 @@ compaction path must see immediately) are never retried. Each retry posts a
 
 `"api": "openai-codex-responses", "auth": "codex"` routes a configured
 model through the ChatGPT Codex Responses SSE endpoint without an API key.
-`whip login codex` implements Codex's device-code sign-in: it shows the
-verification URL and one-time code, polls until approval (or ctrl+c), exchanges
-the server-provided PKCE verifier, and atomically stores the result in
-Codex-compatible `~/.codex/auth.json`. The resulting Codex state takes
+`whip auth codex` (with `whip login codex` as a compatible alias) implements
+Codex's device-code sign-in: it shows the verification URL and one-time code,
+polls until approval (or ctrl+c), exchanges the server-provided PKCE verifier,
+atomically stores the result in Codex-compatible `~/.codex/auth.json`, and
+then upserts the `codex` provider plus `gpt-5.4` route. `/auth codex` does the
+same within an active TUI session, so `/model` shows the new route immediately.
+Neither flow changes the user's default model. The resulting Codex state takes
 precedence; an existing Codex CLI login or Pi's `~/.pi/agent/auth.json` remains
 a fallback. `internal/codexauth/auth.go` derives missing account and expiry
 data from JWT claims, refreshes within five minutes of expiry, and preserves
@@ -179,9 +182,8 @@ credentials are accepted only for `https://chatgpt.com/backend-api`. Tests:
 `codexauth/auth_test.go`, `cmd/whip/login_test.go`, `llm/codex_test.go`, and
 `tui/model_cmd_test.go` (`TestBuildAgentCodexAuth*`).
 
-`cmd/whip/auth.go`, `internal/config/openrouter.go`,
-`internal/tui/auth_cmd.go` — one-command provider onboarding, first (and
-currently only) for OpenRouter. `whip auth openrouter [--env] [<key>]` takes
+`cmd/whip/auth.go`, `internal/config/openrouter.go`, `internal/config/codex.go`,
+`internal/tui/auth_cmd.go` — one-command provider onboarding. `whip auth openrouter [--env] [<key>]` takes
 the key from arg / `OPENROUTER_API_KEY` / a masked prompt, **validates it
 against the live API before writing anything** (a rejected key leaves no
 trace), upserts the `openrouter` provider into config (literal `apiKey` by
@@ -193,12 +195,16 @@ model usable with zero per-model config via catalog resolution. In-session,
 prompt (the `namePrompt` machinery with a `mask` flag — the key never
 echoes, and the inline-key form is kept out of ↑-recallable input history);
 a session already routed through openrouter is hot-rebuilt with the new key
-so re-authing fixes a 401 without a `/model` round-trip. Tests:
+so re-authing fixes a 401 without a `/model` round-trip. `whip auth codex` and
+`/auth codex` use the subscription device flow above and make its fixed route
+available immediately (Codex has no compatible catalog). Tests:
 `config/openrouter_test.go` (upsert modes, idempotence, `TrimKey`),
 `cmd/whip/auth_test.go` (httptest fake OpenRouter — good key wires provider
 + catalog + makes catalog models resolvable, bad key writes nothing,
-re-auth keeps other providers/models), `tui/auth_cmd_test.go` (usage,
-masked prompt open/cancel, good/bad result, live-session rekey).
+re-auth keeps other providers/models), `config/codex_test.go` (fixed route,
+preservation, idempotence), `cmd/whip/login_test.go` (login configures Codex),
+and `tui/auth_cmd_test.go` (usage, masked prompt open/cancel, good/bad result,
+live-session rekey, Codex picker route).
 
 ## The TUI
 

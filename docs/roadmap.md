@@ -81,7 +81,7 @@ parallel tool calls and background subagents).
 ## Models & providers
 
 - [x] Model → provider routing in config (switch providers without touching models)
-- [x] Codex subscription provider: `whip login codex` runs Codex's device-code OAuth and writes compatible local state; existing Codex CLI/Pi OAuth remains a fallback, expiring credentials refresh, and the ChatGPT Codex Responses SSE endpoint maps into the existing tool loop; configured context/maxOut stay authoritative because it has no compatible `/models` catalog
+- [x] Codex subscription provider: `whip auth codex` (with `whip login codex` as an alias) runs Codex's device-code OAuth, writes compatible local state, and immediately configures `gpt-5.4 @ codex` for `/model`; `/auth codex` does the same in-session. Existing Codex CLI/Pi OAuth remains a fallback, expiring credentials refresh, and the ChatGPT Codex Responses SSE endpoint maps into the existing tool loop; configured context/maxOut stay authoritative because it has no compatible `/models` catalog
 - [ ] `anthropic-messages` API style alongside `openai-completions` (pi: `packages/ai/src/api/`)
 - [x] `"$VAR"` / `"!cmd"` resolution for apiKey/header values in config (pi models.json value resolution) — shipped with secrets-by-reference (internal/config/secret.go), resolved at point of use
 - [x] Reasoning effort: `/effort [off|low|medium|high]` (bare opens the selector), tab-completes, clickable `⚡` control in the header top-right; sent as `reasoning_effort`, inherited by subagents, survives model switches
