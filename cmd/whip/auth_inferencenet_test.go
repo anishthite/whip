@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/context-labs/whip/internal/config"
 	"github.com/context-labs/whip/internal/inferencenet"
 )
 
@@ -24,10 +23,8 @@ func TestAuthInferenceNetDispatch(t *testing.T) {
 	}
 }
 
-func TestAuthInferenceNetBYOKNoKey(t *testing.T) {
-	t.Setenv("WHIP_HOME", t.TempDir())
-	t.Setenv(config.InferenceNetEnvVar, "")
-	if err := authCLI([]string{"inference-net", "login", "--key", ""}); err == nil {
+func TestInferenceNetBYOKNoKey(t *testing.T) {
+	if err := inferenceNetBYOK("", false); err == nil {
 		t.Error("BYOK with no key should error")
 	}
 }
