@@ -5,19 +5,18 @@ request and how to run the same checks locally before you push.
 
 ## Before you push
 
-Run the full local gate — it's exactly what CI runs:
+Run the portable local gate — it mirrors the GitHub Actions Go and
+vulnerability checks:
 
 ```sh
-task ci
+./scripts/ci-local.sh
+# or: task ci
 ```
 
-That composes three tasks:
-
-| Task | What it runs | CI equivalent |
-| --- | --- | --- |
-| `task check` | `gofmt -s`, `go vet`, `go test ./...` | format + vet + tests |
-| `task lint` | `golangci-lint run ./...` | the lint gate (`.golangci.yml`) |
-| `task vuln` | `govulncheck ./...` | the dependency-vulnerability gate |
+It runs formatting, vet, golangci-lint, tidy verification, portable race tests
+with the coverage floor, release-target cross-compilation, and govulncheck.
+Browser/TUI tests and the macOS Swift-driver job still require their respective
+local environments or GitHub runners.
 
 `task lint-fix` auto-fixes what golangci-lint can. The pre-commit hook
 (`task hooks` to enable) runs `task check`.
@@ -42,7 +41,7 @@ Two workflows gate pull requests: **ci** and **security**.
 - **go test -race -shuffle=on** — the portable package set (internal/browser
   and internal/tui need a Chromium sandbox / tty that hosted runners don't
   have; they stay local).
-- **coverage floor (90%)** — total statement coverage of the portable set must
+- **coverage floor (88%)** — total statement coverage of the portable set must
   stay at or above the floor. It's a self-contained `go tool cover` check (no
   external service), so it works identically on fork PRs. The floor is a
   ratchet: it only goes up as coverage improves. New code should come with

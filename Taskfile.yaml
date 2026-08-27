@@ -74,8 +74,9 @@ tasks:
       - go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   ci:
-    desc: "Run the full local CI gate: check + lint + vuln (what CI runs)"
-    deps: [check, lint, vuln]
+    desc: "Run the portable GitHub CI gate locally"
+    cmds:
+      - ./scripts/ci-local.sh
 
   hooks:
     desc: "Enable the repo's git hooks (sets core.hooksPath to scripts/git-hooks)"
