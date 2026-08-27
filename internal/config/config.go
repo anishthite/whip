@@ -126,7 +126,9 @@ type Config struct {
 	CompactModel    string              `json:"compactModel,omitempty"`    // model for compaction summaries; "" = the built-in default
 	CompactProvider string              `json:"compactProvider,omitempty"` // provider for the compaction model; "" = the model's default routing
 	CompactPct      int                 `json:"compactPct,omitempty"`      // compact at this % of the context window; 0 = DefaultCompactPct
-	Theme           string              `json:"theme,omitempty"`           // "light", "dark", or "" (auto-detect at startup)
+	Theme           string              `json:"theme,omitempty"`           // "light", "dark", "" (auto), or a ~/.whip/themes name
+	NoTrustPrompt   bool                `json:"noTrustPrompt,omitempty"`   // never show the folder-trust dialog; untrusted folders decline
+	TPSGauge        string              `json:"tpsGauge,omitempty"`        // "bar", "tach", "spark", "lights", or "off"; empty defaults to tach
 	Mouse           *bool               `json:"mouse,omitempty"`           // false disables capture so native terminal selection works
 	Thinking        *bool               `json:"thinking,omitempty"`        // nil defaults to on; false hides reasoning tokens (ctrl+o)
 	CollapsePaste   *bool               `json:"collapsePaste,omitempty"`   // nil/false: pastes land verbatim; true collapses ≥3-line pastes into a [Pasted ~N lines] placeholder
@@ -151,6 +153,8 @@ type Config struct {
 	// Computer configures computer-use (internal/computer): which apps
 	// computer_exec may drive.
 	Computer ComputerConfig `json:"computer,omitzero"`
+	// Experimental gates opt-in features. hashlineEdit swaps read/edit for staleness-checked hashline tools.
+	Experimental map[string]bool `json:"experimental,omitempty"`
 }
 
 // ComputerConfig gates computer_exec per app (codex's per-bundle-id model).

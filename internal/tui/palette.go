@@ -11,6 +11,7 @@ import (
 	"github.com/context-labs/whip/internal/browser"
 	"github.com/context-labs/whip/internal/config"
 	"github.com/context-labs/whip/internal/mcp"
+	"github.com/context-labs/whip/internal/theme"
 )
 
 // paletteItem is one row in the ctrl+p command palette. It mirrors opencode's
@@ -313,10 +314,13 @@ func (m *model) paletteItems() []paletteItem {
 		},
 		{
 			title: "Theme", category: "Display",
-			dynDesc: func(m *model) string { return "current: " + CurrentTheme() },
+			dynDesc: func(m *model) string { return "current: " + theme.Active() },
 			dynHint: func(m *model) string { return "/theme " + slashHint(m, "/theme") },
 			panel: func(m *model) *ppanel {
-				list := []string{"auto", "light", "dark"}
+				if _, err := theme.Load(); err != nil {
+					config.LogEvent("theme.load", err.Error())
+				}
+				list := theme.Names(theme.All())
 				cur := m.cfg.Theme
 				if cur == "" {
 					cur = "auto"

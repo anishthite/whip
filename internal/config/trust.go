@@ -9,7 +9,7 @@ import (
 // trusted.json records which folder paths the user has trusted (the startup
 // "Do you trust the files in this folder?" dialog). Trust is per absolute
 // path, like Claude Code's hasTrustDialogAccepted per project — trusting a
-// folder means whip may read its files (they feed the model) and, with
+// folder means loopy may read its files (they feed the model) and, with
 // per-command approval, execute code in it.
 
 type trustedFile struct {
@@ -64,9 +64,47 @@ func Trust(dir string) error {
 		return err
 	}
 	if err := os.Rename(tmp, p); err != nil {
-		_ = os.Remove(tmp)
+		os.Remove(tmp)
 		return err
 	}
 	LogEvent("trust.grant", dir)
+	return nil
+}
+
+// TrustPromptDisabled reports whether the user has turned the folder-trust
+// dialog off entirely (config.json "noTrustPrompt": true, or option 3 in
+// the dialog). Untrusted folders then decline startup without asking.
+func TrustPromptDisabled() bool {
+	p, err := path()
+	if err != nil {
+		return false
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return false
+	}
+	var c Config
+	if parseJSONC(data, &c) != nil {
+		return false
+	}
+	return c.NoTrustPrompt
+}
+
+// DisableTrustPrompt sets "noTrustPrompt": true in config.json, preserving
+// everything else. The dialog never shows again; untrusted folders decline.
+func DisableTrustPrompt() error {
+	p, err := path()
+	if err != nil {
+		return err
+	}
+	var c Config
+	if data, err := os.ReadFile(p); err == nil {
+		_ = parseJSONC(data, &c)
+	}
+	c.NoTrustPrompt = true
+	if err := c.Save(); err != nil {
+		return err
+	}
+	LogEvent("trust.disable-prompt", "")
 	return nil
 }

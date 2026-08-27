@@ -661,6 +661,24 @@ environment quirk, not a rod/whip bug; verified on real Chrome.
 The browser-use CLI-over-MCP escape hatch remains available via config for
 anyone wanting the Python ecosystem (§4 option B).
 
+## PR #7 feature reimplementations
+
+### Experimental hashline editing
+
+With `"experimental": {"hashlineEdit": true}` in config, the primary agent uses `hashline_read` and `hashline_edit` in place of `read`/`edit`. Every read line has a `LINE#HASH` anchor; batched edits validate anchors before any mutation, preventing stale-line writes. The implementation is in `internal/tools/hashline.go`, enabled by `Agent.UseHashlineTools`, with coverage in `internal/tools/hashline_test.go`.
+
+### User-authored JSON themes
+
+`~/.whip/themes/*.json` supplies six transcript colors and a dark/light/auto background mode. The `/theme` picker includes loaded theme names and applies them live; config sync reloads changed files. `internal/theme` owns parsing and style resolution; `cmd/themes` is a standalone authoring playground.
+
+### Live TPS gauge
+
+The status line displays a live completion-throughput estimate while a turn streams. Configure `tpsGauge` as `tach` (default), `bar`, `spark`, `lights`, or `off`. `internal/tps` provides the rolling tracker and renderers; `cmd/tps-demo -snap` provides deterministic demo frames.
+
+### Trust prompt suppression and terminal title
+
+The folder-trust dialog offers `Never show again`, persisted as `noTrustPrompt`; untrusted folders then safely decline without a prompt. Whip also sets its terminal title to `whip <cwd>` and updates it after `/cd`.
+
 ## Computer-use (macOS)
 
 `internal/computer/` + `internal/tools/computer.go` — `computer_exec` drives

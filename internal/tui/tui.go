@@ -33,8 +33,10 @@ import (
 	"github.com/context-labs/whip/internal/memory"
 	"github.com/context-labs/whip/internal/session"
 	"github.com/context-labs/whip/internal/skills"
+	"github.com/context-labs/whip/internal/theme"
 	"github.com/context-labs/whip/internal/tools"
 	"github.com/context-labs/whip/internal/tools/bashrun"
+	"github.com/context-labs/whip/internal/tps"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
@@ -52,6 +54,19 @@ var (
 	// visually distinct from the answer.
 	thinkingStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "240", Dark: "245"}).Italic(true)
 )
+
+func syncStyles(s theme.StyleSet) {
+	youStyle, botStyle, toolStyle = s.You, s.Bot, s.Tool
+	dimStyle, errStyle, thinkingStyle = s.Dim, s.Error, s.Thinking
+}
+
+func syncMarkdown(s theme.StyleSet) {
+	if !s.Determined {
+		SetUnknownTheme()
+		return
+	}
+	SetLightTheme(s.Bg == theme.BgLight)
+}
 
 // messages sent from the agent goroutine
 type (
@@ -144,10 +159,11 @@ type model struct {
 	cancel       context.CancelFunc
 	prog         *tea.Program
 
-	store     *session.Store
-	sessionID string
-	saved     int            // messages already persisted (index into agent.Messages)
-	snapshots map[int]string // workspace snapshot ref per turn-start index (mirrors the snapshots table)
+	store      *session.Store
+	sessionID  string
+	saved      int            // messages already persisted (index into agent.Messages)
+	snapshots  map[int]string // workspace snapshot ref per turn-start index (mirrors the snapshots table)
+	tpsTracker *tps.Tracker   // live completion throughput; reset at turn boundaries
 
 	hist     []string         // submitted inputs, for up/down recall
 	pasteBuf string           // held paste text for the [Pasted ~N lines] placeholder (config collapsePaste)
@@ -303,7 +319,8 @@ func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string, ca
 		input: ti, spin: spinner.New(spinner.WithSpinner(spinner.Dot)), follow: true, saved: 1,
 		catalogs: config.LoadCatalogs(), mouseOn: mouseOn, now: time.Now, showThinking: showThinking,
 		compactModel: cfg.CompactModel, compactProv: cfg.CompactProvider,
-		skillScan: func() []skills.Skill { return skills.Scan(skills.DefaultDirs()...) },
+		tpsTracker: tps.New(),
+		skillScan:  func() []skills.Skill { return skills.Scan(skills.DefaultDirs()...) },
 	}
 	m.applyCompactModel()
 	m.agent.CompactThreshold = compactThresholdFor(cfg)
@@ -408,6 +425,7 @@ func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string, ca
 	}
 	// pick the glamour style that matches the pick/detection resolution;
 	// keep how detection resolved so /report can name the source
+	m.loadThemes()
 	m.themeHow = m.applyTheme(cfg.Theme)
 	if m.cfgExtra == nil {
 		m.cfgExtra = map[string]string{}
@@ -826,55 +844,83 @@ func (m *model) persist() {
 // glamour style and every AdaptiveColor UI style follows lipgloss. A theme
 // file change in ANOTHER running whip session is picked up live via
 // syncThemeMsg.
-func (m *model) setTheme(theme string) {
-	if theme != "light" && theme != "dark" {
-		theme = "auto"
+func probeBackground() (theme.Background, bool, string) {
+	how := detectColorScheme()
+	switch CurrentTheme() {
+	case "light":
+		return theme.BgLight, true, how
+	case "dark":
+		return theme.BgDark, true, how
+	default:
+		return theme.BgDark, false, how
 	}
-	how := m.applyTheme(theme)
-	m.themeHow = how // explicit picks return "" — detection source no longer applies
-	m.cfg.Theme = theme
-	if theme == "auto" {
+}
+
+func detectBackground() (theme.Background, bool) {
+	bg, determined, _ := probeBackground()
+	return bg, determined
+}
+
+func (m *model) setTheme(name string) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	m.loadThemes()
+	if _, ok := theme.Find(theme.All(), name); !ok {
+		name = "auto"
+	}
+	how := m.applyTheme(name)
+	m.cfg.Theme = name
+	if name == "auto" {
 		m.cfg.Theme = "" // auto persists as "" (omitted = auto-detect)
 	}
 	if m.cfgExtra == nil {
 		m.cfgExtra = map[string]string{}
 	}
-	if theme == "auto" {
-		delete(m.cfgExtra, "theme") // explicit pick, not omission
+	if name == "auto" {
+		delete(m.cfgExtra, "theme")
 	} else {
-		m.cfgExtra["theme"] = theme
+		m.cfgExtra["theme"] = name
 	}
 	if err := m.cfg.Save(); err != nil {
 		m.append(errStyle.Render("config save failed: " + err.Error()))
 	}
-	m.refreshVP() // re-render the transcript under the new scheme
-	if theme == "auto" {
+	m.refreshVP()
+	if name == "auto" {
 		m.append(dimStyle.Render(fmt.Sprintf("◐ theme: %s (auto: %s)", CurrentTheme(), how)))
-	} else {
-		m.append(dimStyle.Render("◐ theme: " + CurrentTheme()))
+		return
 	}
+	m.append(dimStyle.Render("◐ theme: " + theme.Active()))
 }
 
-// applyTheme points rendering at a scheme WITHOUT persisting: auto re-detects
-// (re-reading the terminal background so switching dark→auto can't stay dark),
-// explicit picks override detection directly. Called by setTheme, startup, and
-// the config watcher. how (only meaningful for auto) names the detection
-// source so a wrong pick is diagnosable in the transcript note.
-func (m *model) applyTheme(theme string) (how string) {
-	switch theme {
-	case "light":
-		SetLightTheme(true)
-		lipgloss.SetHasDarkBackground(false)
-		setSchemeOverride("light")
-	case "dark":
-		SetLightTheme(false)
-		lipgloss.SetHasDarkBackground(true)
-		setSchemeOverride("dark")
-	default: // auto: don't touch m.cfg.Theme — setTheme owns persistence
+// applyTheme points rendering at a scheme without persisting. The config
+// watcher calls this for changes made by another Whip session.
+func (m *model) applyTheme(name string) (how string) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || name == "auto" {
 		setSchemeOverride("")
-		how = detectColorScheme()
+		bg, determined, source := probeBackground()
+		theme.ApplyAuto(bg, determined)
+		how = source
+	} else {
+		how = theme.Apply(name, detectBackground)
+		if name == "light" || name == "dark" {
+			setSchemeOverride(name)
+		} else {
+			setSchemeOverride("")
+		}
 	}
+	s := theme.Styles()
+	syncStyles(s)
+	syncMarkdown(s)
 	return how
+}
+
+// loadThemes refreshes the user theme cache before an apply or picker read.
+// A bad themes directory never blocks the TUI: built-ins remain available and
+// the error is visible in the transcript.
+func (m *model) loadThemes() {
+	if _, err := theme.Load(); err != nil {
+		m.append(errStyle.Render("theme load failed: " + err.Error()))
+	}
 }
 
 // setEffort changes the reasoning effort and stores it both ways: as the new
@@ -987,6 +1033,9 @@ func buildAgent(cfg *config.Config, modelName, provName, sysPrompt string) (*age
 		}
 	} else {
 		tools.ScreenshotSink = nil
+	}
+	if cfg.Experimental["hashlineEdit"] {
+		ag.UseHashlineTools()
 	}
 	return ag, modelName, provName, nil
 }
@@ -1223,7 +1272,9 @@ func (m *model) viewportView() string {
 }
 
 func (m *model) Init() tea.Cmd {
-	return textarea.Blink
+	// Set the terminal title once Bubble Tea's renderer is live; /cd emits the
+	// same command after a successful directory change.
+	return tea.Batch(textarea.Blink, tea.SetWindowTitle(windowTitle()))
 }
 
 func onOff(b bool) string {
@@ -1260,6 +1311,13 @@ func cwd() string {
 	}
 	return "?"
 }
+
+// windowTitle is the terminal window title whip sets while it's running —
+// "whip <cwd>", mirroring pi's "pi <cwd>". bubbletea emits it as an OSC 2
+// sequence (ansi.SetWindowTitle); the shell re-claims the title at its next
+// prompt after whip exits, so we don't need to restore it ourselves.
+// Test: TestWindowTitleTracksCwd (shell_test.go).
+func windowTitle() string { return "whip " + cwd() }
 
 // detectColorScheme figures out whether the terminal background is light and
 // calls SetLightTheme so markdown renders with a matching (high-contrast)
@@ -1652,6 +1710,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case textMsg:
 		m.flushThink() // reasoning always precedes the answer text
 		m.current += string(msg)
+		if m.tpsTracker != nil {
+			m.tpsTracker.Add(string(msg))
+		}
 		// Move complete lines into the transcript so the streaming area
 		// only ever re-renders the last partial line.
 		if i := strings.LastIndexByte(m.current, '\n'); i >= 0 {
@@ -1846,6 +1907,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		m.cancel = nil
 		m.interrupt1 = false
+		if m.tpsTracker != nil {
+			m.tpsTracker.Reset()
+		}
 		m.turnStart = time.Time{}
 		m.maybeTitle()
 		// Cancellation arrives wrapped from the in-flight http request
@@ -2009,6 +2073,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		if !m.busy {
 			return m, nil
+		}
+		if m.tpsTracker != nil {
+			m.tpsTracker.Sample()
 		}
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
@@ -3316,8 +3383,7 @@ func (m *model) command(text string) (tea.Model, tea.Cmd) {
 	case "/lsp":
 		return m.lspCommand(fields)
 	case "/cd":
-		m.cdCommand(strings.TrimSpace(strings.TrimPrefix(text, "/cd")))
-		return m, nil
+		return m, m.cdCommand(strings.TrimSpace(strings.TrimPrefix(text, "/cd")))
 	case "/pwd":
 		m.append(dimStyle.Render(cwd()))
 		return m, nil
@@ -3336,12 +3402,7 @@ func (m *model) command(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "/theme":
 		if len(fields) > 1 {
-			switch fields[1] {
-			case "light", "dark", "auto":
-				m.setTheme(fields[1])
-			default:
-				m.append(errStyle.Render("usage: /theme light|dark|auto"))
-			}
+			m.setTheme(fields[1])
 		} else {
 			m.openPaletteOn("theme") // bare: open the switcher, don't toggle blind
 		}
@@ -3791,7 +3852,47 @@ func (m *model) statusView() string {
 		spend += " · " + fmtCost(cost)
 	}
 	line := fmt.Sprintf(" %s   %s   %s   %s", shortCWD(), model, m.provName, spend)
-	return dimStyle.Render(truncLine(line, max(m.width, 0)))
+	gauge := m.tpsGauge()
+	if gauge == "" || m.width <= 0 {
+		return dimStyle.Render(truncLine(line, max(m.width, 0)))
+	}
+
+	// Reserve the right edge for the gauge. Truncating the complete composed
+	// line would hide the live measurement behind a long cwd or model name.
+	gauge = ansi.Truncate(gauge, m.width, "…")
+	remaining := m.width - ansi.StringWidth(gauge)
+	if remaining <= 0 {
+		return gauge
+	}
+	if remaining <= 3 {
+		return dimStyle.Render(ansi.Truncate(line, remaining, "…"))
+	}
+	return dimStyle.Render(truncLine(line, remaining-3)) + "   " + gauge
+}
+
+// tpsGauge renders the configured tokens/sec gauge for the status line, or ""
+// when the gauge is off, idle, or the style is unknown.
+func (m *model) tpsGauge() string {
+	if !m.busy || m.tpsTracker == nil || m.cfg == nil {
+		return ""
+	}
+	style := m.cfg.TPSGauge
+	if style == "" {
+		style = "tach" // default: the rpm-feeling analog needle
+	}
+	snap := m.tpsTracker.Snapshot()
+	switch style {
+	case "bar":
+		return tps.RenderBar(snap)
+	case "tach":
+		return tps.RenderTach(snap)
+	case "spark":
+		return tps.RenderSparkline(snap)
+	case "lights":
+		return tps.RenderShiftLights(snap)
+	default:
+		return ""
+	}
 }
 
 // shortCWD renders the working directory compactly for the status line: the

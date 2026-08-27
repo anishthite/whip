@@ -20,3 +20,19 @@ func TestTrustGate(t *testing.T) {
 		t.Fatalf("trusted cwd should pass: %v %v", ok, err)
 	}
 }
+
+// With the prompt disabled, an untrusted cwd declines without asking and
+// reports why.
+func TestTrustGatePromptDisabled(t *testing.T) {
+	t.Setenv("WHIP_HOME", t.TempDir())
+	if err := config.DisableTrustPrompt(); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := checkTrust()
+	if ok {
+		t.Fatal("untrusted cwd should not pass with the prompt disabled")
+	}
+	if err == nil {
+		t.Fatal("decline should explain the prompt is disabled")
+	}
+}
