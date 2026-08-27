@@ -144,9 +144,11 @@ func (c *Codex) Stream(ctx context.Context, req Request, onText, onThink func(st
 			}
 		case "response.output_item.added":
 			setResponseMessageID(&msg, event.Item)
+			setCodexReasoning(&msg, event.Item)
 			calls.add(event.Item, false)
 		case "response.output_item.done", "response.function_call_arguments.done":
 			setResponseMessageID(&msg, event.Item)
+			setCodexReasoning(&msg, event.Item)
 			calls.add(event.Item, true)
 			if event.CallID != "" {
 				calls.add(responseItem{CallID: event.CallID, Arguments: event.Arguments}, true)
@@ -157,6 +159,7 @@ func (c *Codex) Stream(ctx context.Context, req Request, onText, onThink func(st
 			usage = event.Response.Usage.usage()
 			for _, item := range event.Response.Output {
 				setResponseMessageID(&msg, item)
+				setCodexReasoning(&msg, item)
 			}
 			calls.addAll(event.Response.Output)
 		}
@@ -248,10 +251,11 @@ type codexRequestBody struct {
 	Reasoning    *struct {
 		Effort string `json:"effort"`
 	} `json:"reasoning,omitempty"`
-	Store             bool   `json:"store"`
-	Stream            bool   `json:"stream"`
-	ToolChoice        string `json:"tool_choice"`
-	ParallelToolCalls bool   `json:"parallel_tool_calls"`
+	Include           []string `json:"include,omitempty"`
+	Store             bool     `json:"store"`
+	Stream            bool     `json:"stream"`
+	ToolChoice        string   `json:"tool_choice"`
+	ParallelToolCalls bool     `json:"parallel_tool_calls"`
 }
 
 type responseTool struct {
@@ -266,6 +270,7 @@ func codexRequest(req Request, stream bool) codexRequestBody {
 	body := codexRequestBody{
 		Model:             req.Model,
 		Input:             []any{},
+		Include:           []string{"reasoning.encrypted_content"},
 		Store:             false,
 		Stream:            stream,
 		ToolChoice:        "auto",
@@ -294,6 +299,9 @@ func codexRequest(req Request, stream bool) codexRequestBody {
 				body.Input = append(body.Input, responseInputMessage{Role: "user", Content: content})
 			}
 		case "assistant":
+			for _, reasoning := range msg.CodexReasoning {
+				body.Input = append(body.Input, reasoning)
+			}
 			if text := msg.TextContent(); text != "" {
 				// Codex accepts previous assistant text only as a completed output
 				// message item. A bare assistant input message with output_text is
@@ -482,6 +490,18 @@ type responseItem struct {
 	Name      string            `json:"name"`
 	Arguments string            `json:"arguments"`
 	Content   []responseContent `json:"content"`
+	Raw       json.RawMessage   `json:"-"`
+}
+
+func (i *responseItem) UnmarshalJSON(data []byte) error {
+	type wire responseItem
+	var item wire
+	if err := json.Unmarshal(data, &item); err != nil {
+		return err
+	}
+	*i = responseItem(item)
+	i.Raw = append(i.Raw[:0], data...)
+	return nil
 }
 
 type responseUsage struct {
@@ -562,6 +582,20 @@ func setResponseMessageID(msg *Message, item responseItem) {
 	if item.Phase != "" {
 		msg.ResponsePhase = item.Phase
 	}
+}
+
+func setCodexReasoning(msg *Message, item responseItem) {
+	if item.Type != "reasoning" || len(item.Raw) == 0 {
+		return
+	}
+	for index, prior := range msg.CodexReasoning {
+		var existing responseItem
+		if json.Unmarshal(prior, &existing) == nil && existing.ID == item.ID {
+			msg.CodexReasoning[index] = append(json.RawMessage(nil), item.Raw...)
+			return
+		}
+	}
+	msg.CodexReasoning = append(msg.CodexReasoning, append(json.RawMessage(nil), item.Raw...))
 }
 
 func (c *callCollector) delta(callID, delta string) {

@@ -42,6 +42,8 @@ func TestCodexStreamRequestAndEvents(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"plan\"}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs-1\"}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs-1\",\"encrypted_content\":\"encrypted\"}}\n\n")
 		fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg-1\",\"phase\":\"commentary\"}}\n\n")
 		fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n")
 		fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc-1\",\"call_id\":\"call-1\",\"name\":\"bash\"}}\n\n")
@@ -80,6 +82,9 @@ func TestCodexStreamRequestAndEvents(t *testing.T) {
 	if msg.ResponsePhase != "commentary" {
 		t.Fatalf("response message phase = %q", msg.ResponsePhase)
 	}
+	if len(msg.CodexReasoning) != 1 || !strings.Contains(string(msg.CodexReasoning[0]), `"encrypted_content":"encrypted"`) {
+		t.Fatalf("Codex reasoning = %s", msg.CodexReasoning)
+	}
 	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].ID != "call-1" || msg.ToolCalls[0].Function.Name != "bash" || msg.ToolCalls[0].Function.Arguments != `{"command":"pwd"}` {
 		t.Fatalf("tool calls: %+v", msg.ToolCalls)
 	}
@@ -91,6 +96,9 @@ func TestCodexStreamRequestAndEvents(t *testing.T) {
 	}
 	if got["model"] != "gpt-5.4" || got["instructions"] != "system prompt" || got["stream"] != true || got["store"] != false || got["tool_choice"] != "auto" || got["parallel_tool_calls"] != true {
 		t.Fatalf("request = %#v", got)
+	}
+	if include, ok := got["include"].([]any); !ok || len(include) != 1 || include[0] != "reasoning.encrypted_content" {
+		t.Fatalf("include = %#v", got["include"])
 	}
 	if _, ok := got["max_output_tokens"]; ok {
 		t.Fatalf("Codex subscription request must omit max_output_tokens: %#v", got)
@@ -155,7 +163,7 @@ func TestCodexRequestUsesOutputMessageForAssistantHistory(t *testing.T) {
 		Messages: []Message{
 			{Role: "system", Content: "system prompt"},
 			{Role: "user", Content: "inspect the repository"},
-			{Role: "assistant", Content: "I will inspect it.", ResponseID: "msg-1", ResponsePhase: "commentary", ToolCalls: []ToolCall{call}},
+			{Role: "assistant", Content: "I will inspect it.", ResponseID: "msg-1", ResponsePhase: "commentary", CodexReasoning: []json.RawMessage{json.RawMessage(`{"type":"reasoning","id":"rs-1","encrypted_content":"encrypted"}`)}, ToolCalls: []ToolCall{call}},
 			{Role: "tool", ToolCallID: "call-1", Content: "README contents"},
 		},
 	}, true)
@@ -169,7 +177,7 @@ func TestCodexRequestUsesOutputMessageForAssistantHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := got["input"].([]any)
-	if len(input) != 4 {
+	if len(input) != 5 {
 		t.Fatalf("input = %#v", input)
 	}
 	user := input[0].(map[string]any)
@@ -179,7 +187,11 @@ func TestCodexRequestUsesOutputMessageForAssistantHistory(t *testing.T) {
 	if _, ok := user["type"]; ok {
 		t.Fatalf("user input must not carry a type discriminator: %#v", user)
 	}
-	assistant := input[1].(map[string]any)
+	reasoning := input[1].(map[string]any)
+	if reasoning["type"] != "reasoning" || reasoning["id"] != "rs-1" || reasoning["encrypted_content"] != "encrypted" {
+		t.Fatalf("reasoning history = %#v", reasoning)
+	}
+	assistant := input[2].(map[string]any)
 	if assistant["type"] != "message" || assistant["role"] != "assistant" {
 		t.Fatalf("assistant history = %#v", assistant)
 	}
@@ -200,7 +212,7 @@ func TestCodexRequestUsesOutputMessageForAssistantHistory(t *testing.T) {
 	if annotations, ok := text["annotations"].([]any); !ok || len(annotations) != 0 {
 		t.Fatalf("assistant annotations = %#v", text["annotations"])
 	}
-	callItem := input[2].(map[string]any)
+	callItem := input[3].(map[string]any)
 	if callItem["type"] != "function_call" || callItem["id"] != "fc-1" || callItem["call_id"] != "call-1" {
 		t.Fatalf("assistant tool call = %#v", callItem)
 	}

@@ -59,6 +59,9 @@ type Message struct {
 	// "commentary"). Codex requires it to be preserved when it appears on a
 	// prior assistant message.
 	ResponsePhase string `json:"response_phase,omitempty"`
+	// CodexReasoning holds opaque Responses reasoning items, including encrypted
+	// content. It is replayed only to Codex; generic providers never receive it.
+	CodexReasoning []json.RawMessage `json:"codex_reasoning,omitempty"`
 	// RewoundFrom notes that this message replaced an earlier clipped one
 	// (rewind + resubmit). Internal only — never sent to the provider.
 	RewoundFrom string `json:"rewound_from,omitempty"`
@@ -116,18 +119,19 @@ func ImagePart(ext string, data []byte) ContentPart {
 // fields are omitempty and cleared by stripAuthored before a provider request,
 // so they only ever appear in the persisted session store.
 type messageWire struct {
-	Role          string     `json:"role"`
-	Content       any        `json:"content"`
-	ToolCalls     []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID    string     `json:"tool_call_id,omitempty"`
-	Name          string     `json:"name,omitempty"`
-	Authored      bool       `json:"authored,omitempty"`
-	SentAt        *time.Time `json:"sent_at,omitempty"`
-	Usage         *Usage     `json:"usage,omitempty"`
-	Model         string     `json:"model,omitempty"`
-	ResponseID    string     `json:"response_id,omitempty"`
-	ResponsePhase string     `json:"response_phase,omitempty"`
-	RewoundFrom   string     `json:"rewound_from,omitempty"`
+	Role           string            `json:"role"`
+	Content        any               `json:"content"`
+	ToolCalls      []ToolCall        `json:"tool_calls,omitempty"`
+	ToolCallID     string            `json:"tool_call_id,omitempty"`
+	Name           string            `json:"name,omitempty"`
+	Authored       bool              `json:"authored,omitempty"`
+	SentAt         *time.Time        `json:"sent_at,omitempty"`
+	Usage          *Usage            `json:"usage,omitempty"`
+	Model          string            `json:"model,omitempty"`
+	ResponseID     string            `json:"response_id,omitempty"`
+	ResponsePhase  string            `json:"response_phase,omitempty"`
+	CodexReasoning []json.RawMessage `json:"codex_reasoning,omitempty"`
+	RewoundFrom    string            `json:"rewound_from,omitempty"`
 }
 
 // MarshalJSON sends Content as a plain string for text-only messages and as a
@@ -136,7 +140,7 @@ func (m Message) MarshalJSON() ([]byte, error) {
 	w := messageWire{
 		Role: m.Role, Content: m.Content, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID,
 		Name: m.Name, Authored: m.Authored, SentAt: m.SentAt, Usage: m.Usage,
-		Model: m.Model, ResponseID: m.ResponseID, ResponsePhase: m.ResponsePhase, RewoundFrom: m.RewoundFrom,
+		Model: m.Model, ResponseID: m.ResponseID, ResponsePhase: m.ResponsePhase, CodexReasoning: m.CodexReasoning, RewoundFrom: m.RewoundFrom,
 	}
 	if len(m.Parts) > 0 {
 		parts := m.Parts
@@ -159,7 +163,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	m.Role, m.ToolCalls, m.ToolCallID, m.Name = raw.Role, raw.ToolCalls, raw.ToolCallID, raw.Name
-	m.Authored, m.SentAt, m.Usage, m.Model, m.ResponseID, m.ResponsePhase, m.RewoundFrom = raw.Authored, raw.SentAt, raw.Usage, raw.Model, raw.ResponseID, raw.ResponsePhase, raw.RewoundFrom
+	m.Authored, m.SentAt, m.Usage, m.Model, m.ResponseID, m.ResponsePhase, m.CodexReasoning, m.RewoundFrom = raw.Authored, raw.SentAt, raw.Usage, raw.Model, raw.ResponseID, raw.ResponsePhase, raw.CodexReasoning, raw.RewoundFrom
 	if len(raw.Content) == 0 {
 		return nil
 	}
@@ -226,6 +230,7 @@ func stripInternal(msgs []Message, keepCodexIDs bool) []Message {
 		if !keepCodexIDs {
 			out[i].ResponseID = ""
 			out[i].ResponsePhase = ""
+			out[i].CodexReasoning = nil
 		}
 		out[i].RewoundFrom = ""
 		for j := range out[i].ToolCalls {
