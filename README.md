@@ -47,7 +47,7 @@ go install github.com/context-labs/whip/cmd/whip@latest
 Run the full portable GitHub CI check from a source checkout:
 
 ```sh
-./scripts/ci-full.sh
+./scripts/ci-gh.sh
 ```
 
 For the existing general local check, use `task ci`.
