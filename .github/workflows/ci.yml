@@ -101,14 +101,13 @@ jobs:
             -coverprofile=cover.out -coverpkg="$(echo $PKGS | tr ' ' ',')" $PKGS
 
       # Self-contained coverage floor — no external service or token, so it
-      # works identically on fork PRs. The current portable-suite baseline is
-      # ~88.2%; the gate fails if total statement coverage drops below the floor.
-      # Ratchet the floor up as the newly added provider paths gain coverage.
-      - name: coverage floor (88%)
+      # works identically on fork PRs. The gate fails if total statement
+      # coverage drops below the floor.
+      - name: coverage floor (90%)
         run: |
           total=$(go tool cover -func=cover.out | awk '/^total:/ {gsub("%","",$3); print $3}')
           echo "total coverage: ${total}%"
-          awk -v t="$total" -v floor=88 'BEGIN { if (t+0 < floor) { printf "coverage %.1f%% is below the %d%% floor\n", t, floor; exit 1 } }'
+          awk -v t="$total" -v floor=90 'BEGIN { if (t+0 < floor) { printf "coverage %.1f%% is below the %d%% floor\n", t, floor; exit 1 } }'
 
   # Each GOOS/GOARCH compiles its own copy of the standard library and shares
   # no build cache with the others, and `go build` already saturates a

@@ -10,7 +10,7 @@ Choose the check for the feedback you need:
 | Command | Use it when | What it runs |
 | --- | --- | --- |
 | `task ci` | Normal local development and pre-commit feedback | Formatting, vet, the full local test suite (including browser/TUI when your machine supports them), lint, and vulnerability scanning. |
-| `./scripts/ci-gh.sh` | You want to reproduce the portable GitHub Go/security gates before pushing | Formatting, vet, lint, tidy verification, race tests with shuffled order, the 88% coverage floor, release-target cross-compilation, and vulnerability scanning. It excludes browser/TUI tests because hosted Linux runners lack their Chrome/TTY requirements. |
+| `./scripts/ci-gh.sh` | You want to reproduce the portable GitHub Go/security gates before pushing | Formatting, vet, lint, tidy verification, race tests with shuffled order, the 90% coverage floor, release-target cross-compilation, and vulnerability scanning. It excludes browser/TUI tests because hosted Linux runners lack their Chrome/TTY requirements. |
 
 The separate macOS Swift-driver job still requires its GitHub runner or a local
 macOS driver build. `task lint-fix` auto-fixes what golangci-lint can. The
@@ -36,7 +36,7 @@ Two workflows gate pull requests: **ci** and **security**.
 - **go test -race -shuffle=on** — the portable package set (internal/browser
   and internal/tui need a Chromium sandbox / tty that hosted runners don't
   have; they stay local).
-- **coverage floor (88%)** — total statement coverage of the portable set must
+- **coverage floor (90%)** — total statement coverage of the portable set must
   stay at or above the floor. It's a self-contained `go tool cover` check (no
   external service), so it works identically on fork PRs. The floor is a
   ratchet: it only goes up as coverage improves. New code should come with
