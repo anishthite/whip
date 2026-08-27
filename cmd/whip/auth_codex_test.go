@@ -84,6 +84,38 @@ func TestAuthCodexCLIUsage(t *testing.T) {
 	}
 }
 
+func TestAuthCodexKeepsLoginWhenCatalogIsUnavailable(t *testing.T) {
+	t.Setenv("WHIP_HOME", t.TempDir())
+	expires := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/accounts/deviceauth/usercode":
+			_, _ = w.Write([]byte(`{"device_auth_id":"device-id","user_code":"ABCD-1234","interval":"1"}`))
+		case "/api/accounts/deviceauth/token":
+			_, _ = w.Write([]byte(`{"authorization_code":"authorization-code","code_verifier":"verifier"}`))
+		case "/oauth/token":
+			_, _ = w.Write([]byte(`{"access_token":"new-access","refresh_token":"new-refresh","id_token":"` + testJWT(t, expires, "account") + `"}`))
+		case "/codex/models":
+			http.Error(w, "catalog unavailable", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	source := &codexauth.Source{HomeDir: t.TempDir(), HTTP: srv.Client(), IssuerURL: srv.URL}
+	if err := authCodexAt(context.Background(), source, &out, srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Codex model catalog could not be fetched yet") {
+		t.Fatalf("output = %q", out.String())
+	}
+	if _, ok := config.LoadCatalogs()[config.CodexProviderName]; ok {
+		t.Fatalf("failed catalog fetch should not be cached: %+v", config.LoadCatalogs())
+	}
+}
+
 func testJWT(t *testing.T, expires time.Time, account string) string {
 	t.Helper()
 	payload, err := json.Marshal(map[string]any{

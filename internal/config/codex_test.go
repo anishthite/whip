@@ -69,3 +69,17 @@ func TestUpsertCodexPreservesExistingRoute(t *testing.T) {
 		t.Errorf("codex provider was not refreshed: %+v", got)
 	}
 }
+
+func TestUpsertCodexInitializesEmptyConfig(t *testing.T) {
+	cfg := &Config{}
+
+	cfg.UpsertCodex()
+
+	if cfg.Providers[CodexProviderName].Auth != "codex" {
+		t.Fatalf("provider = %+v", cfg.Providers[CodexProviderName])
+	}
+	model := cfg.Models[CodexDefaultModel]
+	if len(model.Providers) != 1 || model.Providers[0] != CodexProviderName || model.Context != CodexDefaultContext || model.MaxOut != CodexDefaultMaxOut {
+		t.Fatalf("model = %+v", model)
+	}
+}

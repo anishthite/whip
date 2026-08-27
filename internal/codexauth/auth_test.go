@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -407,6 +408,63 @@ func TestDeviceLoginCancellation(t *testing.T) {
 	err := (&Source{HomeDir: t.TempDir(), HTTP: srv.Client(), IssuerURL: srv.URL}).DeviceLogin(ctx, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want cancellation", err)
+	}
+}
+
+func TestDeviceLoginReportsPollingFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/accounts/deviceauth/usercode":
+			_, _ = w.Write([]byte(`{"device_auth_id":"device-id","user_code":"ABCD-1234","interval":"1"}`))
+		case "/api/accounts/deviceauth/token":
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	err := (&Source{HomeDir: t.TempDir(), HTTP: srv.Client(), IssuerURL: srv.URL}).DeviceLogin(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "poll device login: server returned 503 Service Unavailable") {
+		t.Fatalf("error = %v, want polling failure", err)
+	}
+}
+
+func TestDeviceLoginRequiresAccountClaim(t *testing.T) {
+	expires := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	idToken := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`)) + "." + base64.RawURLEncoding.EncodeToString([]byte(`{"exp":`+strconv.FormatInt(expires.Unix(), 10)+`}`)) + ".sig"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/accounts/deviceauth/usercode":
+			_, _ = w.Write([]byte(`{"device_auth_id":"device-id","user_code":"ABCD-1234","interval":"1"}`))
+		case "/api/accounts/deviceauth/token":
+			_, _ = w.Write([]byte(`{"authorization_code":"authorization-code","code_verifier":"verifier"}`))
+		case "/oauth/token":
+			_, _ = w.Write([]byte(`{"access_token":"access","refresh_token":"refresh","id_token":"` + idToken + `"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	err := (&Source{HomeDir: t.TempDir(), HTTP: srv.Client(), IssuerURL: srv.URL}).DeviceLogin(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "could not determine Codex account") {
+		t.Fatalf("error = %v, want missing account claim", err)
+	}
+}
+
+func TestDeviceLoginEndpointStatusErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	source := Source{HTTP: srv.Client(), IssuerURL: srv.URL, TokenURL: srv.URL + "/oauth/token"}
+	if _, err := source.requestDeviceCode(context.Background()); err == nil || !strings.Contains(err.Error(), "start device login: server returned 503 Service Unavailable") {
+		t.Fatalf("device-code error = %v", err)
+	}
+	if _, err := source.exchangeDeviceCode(context.Background(), "code", "verifier"); err == nil || !strings.Contains(err.Error(), "exchange device login: server returned 503 Service Unavailable") {
+		t.Fatalf("token-exchange error = %v", err)
 	}
 }
 

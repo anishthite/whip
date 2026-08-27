@@ -476,6 +476,77 @@ func TestCodexModelsReturnsHTTPError(t *testing.T) {
 	}
 }
 
+func TestCodexModelsFailureModes(t *testing.T) {
+	if _, err := NewCodex("https://codex.test", nil).Models(context.Background()); !errors.Is(err, codexauth.ErrLoginRequired) {
+		t.Fatalf("nil source error = %v, want login required", err)
+	}
+
+	client := NewCodex("https://codex.test", codexSource(t))
+	client.HTTP = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("network down")
+	})}
+	if _, err := client.Models(context.Background()); err == nil || !strings.Contains(err.Error(), "network down") {
+		t.Fatalf("transport error = %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"models":[{"slug":"","supported_in_api":true},{"slug":"rollout","supported_in_api":false}]}`))
+	}))
+	defer srv.Close()
+	models, err := NewCodex(srv.URL, codexSource(t)).Models(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 0 {
+		t.Fatalf("unsupported catalog entries = %+v, want none", models)
+	}
+	if efforts := (codexModel{SupportedReasoningLevels: []codexReasoningLevel{{}, {Effort: "high"}}}).ReasoningEfforts(); len(efforts) != 1 || efforts[0] != "high" {
+		t.Fatalf("reasoning efforts = %v", efforts)
+	}
+}
+
+func TestCodexStreamAndCompleteRequireLogin(t *testing.T) {
+	client := NewCodex("https://codex.test", nil)
+	if _, _, err := client.Stream(context.Background(), Request{Model: "gpt-5.4"}, nil, nil); !errors.Is(err, codexauth.ErrLoginRequired) {
+		t.Fatalf("Stream() error = %v, want login required", err)
+	}
+	if _, _, err := client.Complete(context.Background(), Request{Model: "gpt-5.4"}); !errors.Is(err, codexauth.ErrLoginRequired) {
+		t.Fatalf("Complete() error = %v, want login required", err)
+	}
+}
+
+func TestCodexModelsRejectsMalformedCatalog(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"models":`))
+	}))
+	defer srv.Close()
+
+	if _, err := NewCodex(srv.URL, codexSource(t)).Models(context.Background()); err == nil {
+		t.Fatal("malformed catalog was accepted")
+	}
+}
+
+func TestCallCollectorHandlesPartialAndCompletedCalls(t *testing.T) {
+	collector := callCollector{}
+	collector.delta("", `{"ignored":true}`)
+	collector.delta("call-1", `{"path":"REA`)
+	collector.addAll([]responseItem{
+		{Type: "message", ID: "msg-1"},
+		{Type: "function_call", CallID: "call-1", ID: "fc-1", Name: "read", Arguments: `{"path":"README.md"}`},
+		{Name: "unnamed"},
+	})
+
+	if len(collector.calls) != 2 {
+		t.Fatalf("calls = %+v, want two calls", collector.calls)
+	}
+	if got := collector.calls[0]; got.ID != "call-1" || got.ItemID != "fc-1" || got.Function.Name != "read" || got.Function.Arguments != `{"path":"README.md"}` {
+		t.Fatalf("completed call = %+v", got)
+	}
+	if got := collector.calls[1]; got.ID != "output-0" || got.Function.Name != "unnamed" {
+		t.Fatalf("unnamed call = %+v", got)
+	}
+}
+
 func TestCodexStreamErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
