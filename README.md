@@ -44,11 +44,13 @@ go install github.com/context-labs/whip/cmd/whip@latest
 
 ## Development
 
-Run the portable GitHub CI checks from a source checkout:
+Run the full portable GitHub CI check from a source checkout:
 
 ```sh
-./scripts/ci-local.sh
+./scripts/ci-full.sh
 ```
+
+For the existing general local check, use `task ci`.
 
 After installing, run `whip` to get started. Defaults to inference.net models — any
 OpenAI-compatible endpoint works as a provider. One command wires up
