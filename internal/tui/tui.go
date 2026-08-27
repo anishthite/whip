@@ -34,6 +34,7 @@ import (
 	"github.com/context-labs/whip/internal/skills"
 	"github.com/context-labs/whip/internal/tools"
 	"github.com/context-labs/whip/internal/tools/bashrun"
+	"github.com/context-labs/whip/internal/tps"
 	"github.com/context-labs/whip/internal/update"
 
 	"github.com/charmbracelet/x/ansi"
@@ -145,10 +146,11 @@ type model struct {
 	cancel       context.CancelFunc
 	prog         *tea.Program
 
-	store     *session.Store
-	sessionID string
-	saved     int            // messages already persisted (index into agent.Messages)
-	snapshots map[int]string // workspace snapshot ref per turn-start index (mirrors the snapshots table)
+	store      *session.Store
+	sessionID  string
+	saved      int            // messages already persisted (index into agent.Messages)
+	snapshots  map[int]string // workspace snapshot ref per turn-start index (mirrors the snapshots table)
+	tpsTracker *tps.Tracker
 
 	hist     []string         // submitted inputs, for up/down recall
 	pasteBuf string           // held paste text for the [Pasted ~N lines] placeholder (config collapsePaste)
@@ -308,7 +310,8 @@ func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string, ca
 		input: ti, spin: spinner.New(spinner.WithSpinner(spinner.Dot)), follow: true, saved: 1,
 		catalogs: config.LoadCatalogs(), mouseOn: mouseOn, now: time.Now, showThinking: showThinking,
 		compactModel: cfg.CompactModel, compactProv: cfg.CompactProvider,
-		skillScan: func() []skills.Skill { return skills.Scan(skills.DefaultDirs()...) },
+		tpsTracker: tps.New(),
+		skillScan:  func() []skills.Skill { return skills.Scan(skills.DefaultDirs()...) },
 	}
 	m.applyCompactModel()
 	m.agent.CompactThreshold = compactThresholdFor(cfg)
@@ -1665,6 +1668,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case textMsg:
 		m.flushThink() // reasoning always precedes the answer text
 		m.current += string(msg)
+		if m.tpsTracker != nil {
+			m.tpsTracker.Add(string(msg))
+		}
 		// Move complete lines into the transcript so the streaming area
 		// only ever re-renders the last partial line.
 		if i := strings.LastIndexByte(m.current, '\n'); i >= 0 {
@@ -1877,6 +1883,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		m.cancel = nil
 		m.interrupt1 = false
+		if m.tpsTracker != nil {
+			m.tpsTracker.Reset()
+		}
 		m.turnStart = time.Time{}
 		m.maybeTitle()
 		// Cancellation arrives wrapped from the in-flight http request
@@ -2044,6 +2053,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		if !m.busy {
 			return m, nil
+		}
+		if m.tpsTracker != nil {
+			m.tpsTracker.Sample()
 		}
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
@@ -3788,6 +3800,28 @@ func (m *model) viewBody() string {
 // directory, model (effort), provider, and session token spend. It mirrors
 // the header's data but stays put while the transcript scrolls, so the four
 // facts are always visible no matter where the viewport sits.
+func (m *model) tpsGauge() string {
+	if !m.busy || m.tpsTracker == nil || m.cfg == nil {
+		return ""
+	}
+	style := m.cfg.TPSGauge
+	if style == "" {
+		style = "tach"
+	}
+	snap := m.tpsTracker.Snapshot()
+	switch style {
+	case "bar":
+		return tps.RenderBar(snap)
+	case "tach":
+		return tps.RenderTach(snap)
+	case "spark":
+		return tps.RenderSparkline(snap)
+	case "lights":
+		return tps.RenderShiftLights(snap)
+	}
+	return ""
+}
+
 func (m *model) statusView() string {
 	model := m.modelName
 	if e := effortLabel(m.agent.Effort); e != "off" {
@@ -3802,7 +3836,47 @@ func (m *model) statusView() string {
 		spend += " · " + fmtCost(cost)
 	}
 	line := fmt.Sprintf(" %s   %s   %s   %s", shortCWD(), model, m.provName, spend)
-	return dimStyle.Render(truncLine(line, max(m.width, 0)))
+	gauge := m.tpsGauge()
+	if gauge == "" || m.width <= 0 {
+		return dimStyle.Render(truncLine(line, max(m.width, 0)))
+	}
+
+	// Reserve the right edge for the gauge. Truncating the complete composed
+	// line would hide the live measurement behind a long cwd or model name.
+	gauge = ansi.Truncate(gauge, m.width, "…")
+	remaining := m.width - ansi.StringWidth(gauge)
+	if remaining <= 0 {
+		return gauge
+	}
+	if remaining <= 3 {
+		return dimStyle.Render(ansi.Truncate(line, remaining, "…"))
+	}
+	return dimStyle.Render(truncLine(line, remaining-3)) + "   " + gauge
+}
+
+// tpsGauge renders the configured tokens/sec gauge for the status line, or ""
+// when the gauge is off, idle, or the style is unknown.
+func (m *model) tpsGauge() string {
+	if !m.busy || m.tpsTracker == nil || m.cfg == nil {
+		return ""
+	}
+	style := m.cfg.TPSGauge
+	if style == "" {
+		style = "tach"
+	}
+	snap := m.tpsTracker.Snapshot()
+	switch style {
+	case "bar":
+		return tps.RenderBar(snap)
+	case "tach":
+		return tps.RenderTach(snap)
+	case "spark":
+		return tps.RenderSparkline(snap)
+	case "lights":
+		return tps.RenderShiftLights(snap)
+	default:
+		return ""
+	}
 }
 
 // shortCWD renders the working directory compactly for the status line: the

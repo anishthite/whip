@@ -51,6 +51,11 @@ config):
 whip auth openrouter   # masked key prompt — or /auth openrouter in-session
 ```
 
+While a completion streams, Whip’s status line shows an estimated TPS gauge.
+It defaults to a compact tachometer; set `"tpsGauge"` to `"bar"`, `"tach"`,
+`"spark"`, `"lights"`, or `"off"` in `~/.whip/config.json` to choose its
+style. Explore the deterministic visual lab with `go run ./cmd/tps-demo -snap`.
+
 To update to the latest release later, run `whip update` — it re-runs the
 install script above.
 
