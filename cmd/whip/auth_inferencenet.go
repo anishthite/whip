@@ -53,15 +53,11 @@ func inferenceNetLoginCLI(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	keyProvided := false
-	fs.Visit(func(f *flag.Flag) {
-		keyProvided = keyProvided || f.Name == "key"
-	})
 	k := config.TrimKey(*key)
 	if k == "" {
 		k = config.TrimKey(os.Getenv(config.InferenceNetEnvVar))
 	}
-	if k != "" || *envMode || keyProvided {
+	if k != "" || *envMode {
 		return inferenceNetBYOK(k, *envMode)
 	}
 	return inferenceNetDeviceLogin()

@@ -115,6 +115,7 @@ Improvement plan with per-item checkboxes: [`.ai-docs/plans/mcp-polish/`](../.ai
 
 - [x] Permission prompt: Allow once / Allow always / Reject, where "always" previews the exact rule it installs and "reject" takes a free-text redirect message back to the model (opencode `routes/session/permission.tsx`)
 - [x] Command-prefix arity for useful "allow always" rules: `git checkout branch` → rule for `git checkout`, not the whole string (opencode `permission/arity.ts`)
+- [x] Project trust prompt on first run in a directory (pi: `trust.json`, `defaultProjectTrust: "ask"`) — `internal/tui/trust.go` + `~/.whip/trusted.json`, plain-terminal prompt before the TUI starts, piped stdin declines safely
 - [x] Secrets as references, never values: `"$VAR"`/`"!cmd"` (or `${ENV_VAR}`-style) indirection in config and MCP/tool init, resolved host-side at point of use so raw keys never enter the event log or model context (exo `crates/exoharness/src/secrets.rs` — AES-GCM at rest with keychain/file master key is the full version; the indirection alone is most of the safety)
 
 ## Theming & config

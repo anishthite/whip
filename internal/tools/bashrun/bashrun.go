@@ -226,18 +226,17 @@ func runPiped(ctx context.Context, cmd *exec.Cmd, onUpdate func(string)) Result 
 		updatesDone = make(chan struct{})
 		defer close(updatesDone)
 		go func() {
-			timer := time.NewTimer(updateInterval)
-			defer timer.Stop()
+			ticker := time.NewTicker(updateInterval)
+			defer ticker.Stop()
 			for {
 				select {
 				case <-updatesDone:
 					return
-				case <-timer.C:
+				case <-ticker.C:
 					mu.Lock()
 					snap := out.String()
 					mu.Unlock()
 					onUpdate(snap)
-					timer.Reset(updateInterval)
 				}
 			}
 		}()

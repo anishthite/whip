@@ -42,17 +42,7 @@ Checksum-verified prebuilt binaries (Linux/macOS, x64/arm64). Or from source
 go install github.com/context-labs/whip/cmd/whip@latest
 ```
 
-## Development
-
-Run the full portable GitHub CI check from a source checkout:
-
-```sh
-./scripts/ci-gh.sh
-```
-
-For the existing general local check, use `task ci`.
-
-After installing, run `whip` to get started. Defaults to inference.net models — any
+Then `whip` and you're in. Defaults to inference.net models — any
 OpenAI-compatible endpoint works as a provider. One command wires up
 OpenRouter's whole catalog (`/model` lists every model, no per-model
 config):

@@ -193,15 +193,6 @@ func TestE2EDedicated(t *testing.T) {
 		t.Fatalf("open dedicated: %v", err)
 	}
 	defer b.Close()
-	// Dedicated Close intentionally detaches so a later session can reattach.
-	// This test owns a temporary profile, so explicitly stop its Chrome before
-	// testing removes that directory.
-	prof := dedicatedProfileDir(home, "default")
-	t.Cleanup(func() {
-		cctx, ccancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer ccancel()
-		killProfileChrome(cctx, t, prof)
-	})
 	if err := b.Navigate(ctx, url); err != nil {
 		t.Fatal(err)
 	}
@@ -245,10 +236,7 @@ func TestE2ELiveAttach(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
+	defer cmd.Process.Kill()
 
 	// Seed a cookie INSIDE that browser (simulating the user's session):
 	// attach, navigate to /set-cookie, detach — then the test browser must

@@ -5,16 +5,22 @@ request and how to run the same checks locally before you push.
 
 ## Before you push
 
-Choose the check for the feedback you need:
+Run the full local gate — it's exactly what CI runs:
 
-| Command | Use it when | What it runs |
+```sh
+task ci
+```
+
+That composes three tasks:
+
+| Task | What it runs | CI equivalent |
 | --- | --- | --- |
-| `task ci` | Normal local development and pre-commit feedback | Formatting, vet, the full local test suite (including browser/TUI when your machine supports them), lint, and vulnerability scanning. |
-| `./scripts/ci-gh.sh` | You want to reproduce the portable GitHub Go/security gates before pushing | Formatting, vet, lint, tidy verification, race tests with shuffled order, the 90% Codex-provider coverage floor, release-target cross-compilation, and vulnerability scanning. It excludes browser/TUI tests because hosted Linux runners lack their Chrome/TTY requirements. |
+| `task check` | `gofmt -s`, `go vet`, `go test ./...` | format + vet + tests |
+| `task lint` | `golangci-lint run ./...` | the lint gate (`.golangci.yml`) |
+| `task vuln` | `govulncheck ./...` | the dependency-vulnerability gate |
 
-The separate macOS Swift-driver job still requires its GitHub runner or a local
-macOS driver build. `task lint-fix` auto-fixes what golangci-lint can. The
-pre-commit hook (`task hooks` to enable) runs `task check`.
+`task lint-fix` auto-fixes what golangci-lint can. The pre-commit hook
+(`task hooks` to enable) runs `task check`.
 
 ## What CI checks on every PR
 

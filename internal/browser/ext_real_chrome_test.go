@@ -72,10 +72,7 @@ func TestExtensionRealChrome(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("launch chrome: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
+	defer cmd.Process.Kill()
 
 	// Wait for the extension to pin a tab and connect to the relay.
 	if err := rel.WaitAttached(ctx); err != nil {
