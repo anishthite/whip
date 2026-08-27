@@ -218,6 +218,18 @@ open/cancel, good/bad result, live-session rekey, Codex account catalog picker).
 
 `internal/tui/tui.go` — bubbletea fullscreen alt-screen. Highlights:
 
+- **Live TPS gauge.** While an answer streams, the status line appends a
+  one-line estimate of completion throughput. `internal/tps/tracker.go`
+  derives it from streamed character deltas over a one-second rolling window
+  (providers only return exact completion usage at the end of a turn), and
+  `internal/tps/gauges.go` renders the default tachometer or the configured
+  `"tpsGauge"` style: `"bar"`, `"tach"`, `"spark"`, `"lights"`, or
+  `"off"`. The tracker samples on the existing spinner tick and resets on turn
+  completion, so it is live-only and never leaks into a resumed session.
+  `cmd/tps-demo` is an interactive visual lab; `go run ./cmd/tps-demo -snap`
+  prints deterministic frames without a TTY. Tests: `internal/tps/tracker_test.go`,
+  `internal/tui/status_test.go`, `cmd/tps-demo/main_test.go`.
+
 - **ctrl+c is a two-stage key.** While busy it interrupts the turn (first press
   arms, second cancels). While idle it quits — but only on a **second press
   within a 2-second window**, so a stray ctrl+c can't nuke the session. The
