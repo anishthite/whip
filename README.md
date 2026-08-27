@@ -70,8 +70,7 @@ them). ctrl+c once interrupts; twice quits.
 
 Set `"theme": "dark"`, `"light"`, or a custom theme name in
 `~/.whip/config.json`. Custom JSONC themes live in
-`~/.whip/themes/<name>.json` and appear in `/theme`. To preview a directory of
-themes while editing, run `go run ./cmd/themes --dir ./cmd/themes/examples`.
+`~/.whip/themes/<name>.json` and appear in `/theme`.
 
 ## Docs
 

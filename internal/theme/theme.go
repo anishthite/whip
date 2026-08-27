@@ -5,8 +5,7 @@
 // It has no dependency on the rest of Whip — it's the smallest surface that
 // lets you author a color theme, switch to it, and see markdown + transcript
 // chrome re-render. The Whip TUI wires its existing six UI styles and
-// /theme panel onto this package; the standalone playground in cmd/themes
-// drives it directly.
+// /theme panel onto this package.
 //
 // A theme file is ~/.whip/themes/<name>.json (or any dir passed to LoadFrom),
 // JSONC (comments allowed). Example:
@@ -152,7 +151,7 @@ func joinRoles() string {
 
 // StyleSet is the six concrete lipgloss styles an apply produces, plus the
 // raw resolved colors (so tests can assert exact indices without re-parsing
-// SGR). The TUI and cmd/themes read these to render chrome.
+// SGR). The TUI reads these to render chrome.
 //
 // Role attributes are fixed by role, not by theme: you/bot are Bold, thinking
 // is Italic. A theme only swaps colors — so a user theme can't accidentally
@@ -244,8 +243,8 @@ func Styles() StyleSet {
 }
 
 // DetectFunc resolves an "auto" background to a concrete dark/light. The TUI
-// passes its terminal-background detector; cmd/themes passes a stub. Returning
-// ("", false) means "undetermined" — Apply then uses the neutral markdown
+// passes its terminal-background detector. Returning ("", false) means
+// "undetermined" — Apply then uses the neutral markdown
 // style (SetUnknownTheme) and the dark built-in colors, matching Whip today.
 type DetectFunc func() (bg Background, determined bool)
 
@@ -349,8 +348,7 @@ func ApplyAuto(bg Background, determined bool) string {
 }
 
 // lookup finds a user theme by name from the last Load. Themes are loaded once
-// and cached; the playground polls the dir mtime to hot-reload (see Load +
-// Reload).
+// and cached; call Reload after files change.
 var (
 	loadMu     sync.Mutex
 	loaded     []Theme
@@ -369,7 +367,7 @@ func lookup(name string) (Theme, error) {
 }
 
 // Loaded returns the cached user themes from the last Load (no built-ins).
-// Tests and the playground use it to render the picker without re-reading disk.
+// The TUI uses it to render the picker without re-reading disk.
 func Loaded() []Theme {
 	loadMu.Lock()
 	defer loadMu.Unlock()
@@ -416,7 +414,7 @@ func Load() ([]Theme, error) {
 
 // LoadFrom reads dir/*.json into the cache and returns All() (built-ins +
 // the just-loaded user themes). A missing dir is not an error: it yields just
-// the built-ins, so the playground works before the user has authored anything.
+// the built-ins, so Whip works before the user has authored anything.
 func LoadFrom(dir string) ([]Theme, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -456,7 +454,6 @@ func storeLoaded(themes []Theme, dir string) {
 }
 
 // Reload re-reads the last-loaded dir and returns All() with the fresh set.
-// The playground calls this when it detects the dir's mtime changed (hot edit).
 func Reload() ([]Theme, error) {
 	loadMu.Lock()
 	dir := loadedFrom
@@ -711,7 +708,7 @@ func RenderMarkdown(s string, width int) string {
 	return strings.Trim(out, "\n")
 }
 
-// ----- helpers for the playground / TUI ---------------------------------
+// ----- helpers for the TUI ----------------------------------------------
 
 // Names returns just the names from themes (built-ins first), for a picker.
 func Names(themes []Theme) []string {
