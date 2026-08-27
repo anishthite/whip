@@ -14,6 +14,33 @@ import (
 	"time"
 )
 
+func TestSourceAvailable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		auth string
+		want error
+	}{
+		{
+			name: "valid Codex login",
+			auth: `{"tokens":{"access_token":"access","refresh_token":"refresh","account_id":"account"}}`,
+		},
+		{name: "absent login", want: ErrLoginRequired},
+		{name: "malformed saved credentials", auth: `{not JSON`, want: ErrLoginRequired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			if tc.auth != "" {
+				writeAuth(t, filepath.Join(home, ".codex", "auth.json"), tc.auth)
+			}
+
+			err := (&Source{HomeDir: home}).Available()
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Available() error = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestCredentialsReadsCodex(t *testing.T) {
 	home := t.TempDir()
 	writeAuth(t, filepath.Join(home, ".codex", "auth.json"), `{
@@ -106,6 +133,84 @@ func TestCredentialsRefreshesCodex(t *testing.T) {
 	}
 	if string(tokens["custom"]) != `"preserve"` || string(tokens["access_token"]) != `"new-access"` || string(tokens["refresh_token"]) != `"new-refresh"` {
 		t.Fatalf("stored tokens = %s", stored["tokens"])
+	}
+}
+
+func TestCredentialsRejectsInvalidRefreshResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "non-success response", status: http.StatusUnauthorized, body: "sign in again"},
+		{name: "malformed JSON", status: http.StatusOK, body: "not JSON"},
+		{name: "missing access token", status: http.StatusOK, body: `{"refresh_token":"new-refresh"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			now := time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC)
+			writeAuth(t, filepath.Join(home, ".codex", "auth.json"), `{"tokens":{"access_token":"expired-access","refresh_token":"old-refresh","id_token":"`+jwt(t, now.Add(-time.Hour), "account")+`"}}`)
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/oauth/token" {
+					http.NotFound(w, r)
+					return
+				}
+				if err := r.ParseForm(); err != nil {
+					t.Fatal(err)
+				}
+				if r.PostForm.Get("grant_type") != "refresh_token" || r.PostForm.Get("refresh_token") != "old-refresh" {
+					t.Fatalf("refresh form = %v", r.PostForm)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			source := Source{HomeDir: home, HTTP: srv.Client(), TokenURL: srv.URL + "/oauth/token", now: func() time.Time { return now }}
+			_, err := source.Credentials(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "could not refresh codex login; run whip auth codex") {
+				t.Fatalf("Credentials() error = %v, want actionable refresh error", err)
+			}
+			if strings.Contains(err.Error(), "expired-access") || strings.Contains(err.Error(), "old-refresh") {
+				t.Fatalf("Credentials() leaked saved credential in error: %v", err)
+			}
+		})
+	}
+}
+
+func TestCredentialsReportsRefreshPersistenceFailure(t *testing.T) {
+	home := t.TempDir()
+	now := time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC)
+	dir := filepath.Join(home, ".codex")
+	path := filepath.Join(dir, "auth.json")
+	writeAuth(t, path, `{"tokens":{"access_token":"expired-access","refresh_token":"old-refresh","id_token":"`+jwt(t, now.Add(-time.Hour), "account")+`"}}`)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/oauth/token" {
+			http.NotFound(w, r)
+			return
+		}
+		// Credentials has already read auth.json by the time refresh reaches the
+		// server. Replace its parent directory with a file so the subsequent
+		// atomic write must fail, independent of platform permission semantics.
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(dir); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`))
+	}))
+	defer srv.Close()
+
+	source := Source{HomeDir: home, HTTP: srv.Client(), TokenURL: srv.URL + "/oauth/token", now: func() time.Time { return now }}
+	_, err := source.Credentials(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "save refreshed codex login") {
+		t.Fatalf("Credentials() error = %v, want persistence failure", err)
 	}
 }
 

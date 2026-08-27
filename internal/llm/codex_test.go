@@ -120,6 +120,79 @@ func TestCodexStreamRequestAndEvents(t *testing.T) {
 	}
 }
 
+func TestCodexStreamSkipsMalformedSSEEvent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {not JSON}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"still works\"}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	msg, _, err := NewCodex(srv.URL, codexSource(t)).Stream(context.Background(), Request{Model: "gpt-5.4"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Content != "still works" {
+		t.Fatalf("stream content = %q, want a valid event after malformed SSE to be retained", msg.Content)
+	}
+}
+
+func TestCodexStreamPropagatesRequestCancellation(t *testing.T) {
+	started := make(chan struct{})
+	client := NewCodex("https://codex.test", codexSource(t))
+	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		close(started)
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, _, err := client.Stream(ctx, Request{Model: "gpt-5.4"}, nil, nil)
+		errCh <- err
+	}()
+	<-started
+	cancel()
+
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stream() error = %v, want context cancellation", err)
+	}
+}
+
+func TestCodexStreamKeepsInterleavedToolCallsCorrelated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc-read\",\"call_id\":\"call-read\",\"name\":\"read\"}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc-search\",\"call_id\":\"call-search\",\"name\":\"search\"}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"call_id\":\"call-read\",\"delta\":\"{\\\"path\\\":\\\"REA\"}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"call_id\":\"call-search\",\"delta\":\"{\\\"query\\\":\\\"code\"}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.function_call_arguments.done\",\"call_id\":\"call-search\",\"arguments\":\"{\\\"query\\\":\\\"codex\\\"}\"}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.function_call_arguments.done\",\"call_id\":\"call-read\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	msg, _, err := NewCodex(srv.URL, codexSource(t)).Stream(context.Background(), Request{Model: "gpt-5.4"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.ToolCalls) != 2 {
+		t.Fatalf("tool calls = %+v, want two calls", msg.ToolCalls)
+	}
+	for index, want := range []struct {
+		id, itemID, name, arguments string
+	}{
+		{id: "call-read", itemID: "fc-read", name: "read", arguments: `{"path":"README.md"}`},
+		{id: "call-search", itemID: "fc-search", name: "search", arguments: `{"query":"codex"}`},
+	} {
+		call := msg.ToolCalls[index]
+		if call.ID != want.id || call.ItemID != want.itemID || call.Function.Name != want.name || call.Function.Arguments != want.arguments {
+			t.Fatalf("tool call = %+v, want id=%q item=%q name=%q arguments=%q", call, want.id, want.itemID, want.name, want.arguments)
+		}
+	}
+}
+
 func TestCodexComplete(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -276,6 +349,82 @@ func TestCodexRequestFlattensLegacyToolHistory(t *testing.T) {
 	}
 }
 
+func TestCodexRequestReplaysMalformedLegacyToolArguments(t *testing.T) {
+	legacy := ToolCall{ID: "call-old", Type: "function"}
+	legacy.Function.Name = "bash"
+	legacy.Function.Arguments = `{"command":`
+	body := codexRequest(Request{
+		Model: "gpt-5.6-terra",
+		Messages: []Message{
+			{Role: "assistant", ToolCalls: []ToolCall{legacy}},
+			{Role: "tool", ToolCallID: "call-old", Content: "tool rejected invalid arguments"},
+		},
+	}, true)
+
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	input := got["input"].([]any)
+	if len(input) != 1 {
+		t.Fatalf("input = %#v", input)
+	}
+	context := input[0].(map[string]any)["content"].([]any)[0].(map[string]any)["text"]
+	if context != "[Earlier tool activity]\n\n[Tool call]\nbash({\"command\":)\n\n[Tool result]\ntool rejected invalid arguments" {
+		t.Fatalf("legacy context = %q", context)
+	}
+}
+
+func TestCodexRequestCorrelatesMultipleToolResults(t *testing.T) {
+	read := ToolCall{ID: "call-read", ItemID: "fc-read", Type: "function"}
+	read.Function.Name = "read"
+	read.Function.Arguments = `{"path":"README.md"}`
+	search := ToolCall{ID: "call-search", ItemID: "fc-search", Type: "function"}
+	search.Function.Name = "search"
+	search.Function.Arguments = `{"query":"codex"}`
+	body := codexRequest(Request{
+		Model: "gpt-5.6-terra",
+		Messages: []Message{
+			{Role: "assistant", ToolCalls: []ToolCall{read, search}},
+			{Role: "tool", ToolCallID: "call-read", Content: "README"},
+			{Role: "tool", ToolCallID: "call-search", Content: "matches"},
+		},
+	}, true)
+
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	input := got["input"].([]any)
+	if len(input) != 4 {
+		t.Fatalf("input = %#v", input)
+	}
+	for index, want := range []struct {
+		typeName string
+		callID   string
+		itemID   string
+		output   string
+	}{
+		{typeName: "function_call", callID: "call-read", itemID: "fc-read"},
+		{typeName: "function_call", callID: "call-search", itemID: "fc-search"},
+		{typeName: "function_call_output", callID: "call-read", output: "README"},
+		{typeName: "function_call_output", callID: "call-search", output: "matches"},
+	} {
+		item := input[index].(map[string]any)
+		if item["type"] != want.typeName || item["call_id"] != want.callID || (want.itemID != "" && item["id"] != want.itemID) || (want.output != "" && item["output"] != want.output) {
+			t.Fatalf("input[%d] = %#v, want type=%q call_id=%q item_id=%q output=%q", index, item, want.typeName, want.callID, want.itemID, want.output)
+		}
+	}
+}
+
 func TestCodexModelsFetchesAccountCatalog(t *testing.T) {
 	var gotHeaders http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -329,12 +478,13 @@ func TestCodexModelsReturnsHTTPError(t *testing.T) {
 
 func TestCodexStreamErrors(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		status int
-		body   string
-		want   string
+		name       string
+		status     int
+		body       string
+		want       string
+		wantStatus string
 	}{
-		{name: "HTTP error", status: http.StatusForbidden, body: "not entitled", want: "403 Forbidden"},
+		{name: "HTTP error", status: http.StatusForbidden, body: "not entitled", want: "403 Forbidden", wantStatus: "403 Forbidden"},
 		{name: "API error", status: http.StatusOK, body: "data: {\"type\":\"error\",\"error\":{\"message\":\"quota reached\"}}\n\n", want: "quota reached"},
 		{name: "failed response", status: http.StatusOK, body: "data: {\"type\":\"response.failed\"}\n\n", want: "codex response failed"},
 	} {
@@ -348,6 +498,12 @@ func TestCodexStreamErrors(t *testing.T) {
 			_, _, err := NewCodex(srv.URL, codexSource(t)).Stream(context.Background(), Request{Model: "gpt-5.4"}, nil, nil)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Stream error = %v, want %q", err, tc.want)
+			}
+			if tc.wantStatus != "" {
+				var httpErr *HTTPError
+				if !errors.As(err, &httpErr) || httpErr.Status != tc.wantStatus || !strings.Contains(httpErr.Body, tc.body) {
+					t.Fatalf("Stream error = %#v, want typed HTTP error %q containing %q", err, tc.wantStatus, tc.body)
+				}
 			}
 		})
 	}
@@ -390,4 +546,10 @@ func codexSource(t *testing.T) *codexauth.Source {
 		t.Fatal(err)
 	}
 	return &codexauth.Source{HomeDir: home}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }
