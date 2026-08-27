@@ -44,7 +44,7 @@ func TestAuthCommandUsageAndUnknownProvider(t *testing.T) {
 	m.authCommand(nil)
 	m.authCommand([]string{"anthropic"})
 	out := m.transcriptText()
-	if !strings.Contains(out, "usage: /auth openrouter") || !strings.Contains(out, "/auth codex") {
+	if !strings.Contains(out, "usage: /auth") || !strings.Contains(out, "codex") {
 		t.Errorf("bare /auth should print usage:\n%s", out)
 	}
 	if !strings.Contains(out, "unknown provider anthropic") {

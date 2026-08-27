@@ -24,13 +24,12 @@ import (
 
 func (m *model) authCommand(args []string) {
 	if len(args) == 0 {
-		m.append(dimStyle.Render(
-			"usage: /auth openrouter [key] | /auth codex — " +
-				"OpenRouter accepts a masked key; Codex opens a device login",
-		))
+		m.append(dimStyle.Render("usage: /auth <provider> [key] — inference-net (bare = browser login), openrouter (bare = masked prompt), or codex (device login)"))
 		return
 	}
 	switch args[0] {
+	case "inference-net", "inference":
+		m.authInferenceNetCommand(args)
 	case "codex":
 		if len(args) != 1 {
 			m.append(errStyle.Render("usage: /auth codex"))
@@ -40,7 +39,7 @@ func (m *model) authCommand(args []string) {
 	case "openrouter":
 		m.authOpenRouterCommand(args[1:])
 	default:
-		m.append(errStyle.Render("unknown provider " + args[0] + " (supported: openrouter, codex)"))
+		m.append(errStyle.Render("unknown provider " + args[0] + " (supported: inference-net, openrouter, codex)"))
 	}
 }
 
