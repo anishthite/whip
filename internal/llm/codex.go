@@ -303,6 +303,7 @@ func codexRequest(req Request, stream bool) codexRequestBody {
 					Role:   "assistant",
 					ID:     codexMessageID(msg, messageIDIndex),
 					Status: "completed",
+					Phase:  msg.ResponsePhase,
 					Content: []responseOutputText{{
 						Type:        "output_text",
 						Text:        text,
@@ -434,6 +435,7 @@ type responseOutputMessage struct {
 	Role    string               `json:"role"`
 	ID      string               `json:"id"`
 	Status  string               `json:"status"`
+	Phase   string               `json:"phase,omitempty"`
 	Content []responseOutputText `json:"content"`
 }
 
@@ -475,6 +477,7 @@ type response struct {
 type responseItem struct {
 	Type      string            `json:"type"`
 	ID        string            `json:"id,omitempty"`
+	Phase     string            `json:"phase,omitempty"`
 	CallID    string            `json:"call_id"`
 	Name      string            `json:"name"`
 	Arguments string            `json:"arguments"`
@@ -550,8 +553,14 @@ func codexMessageID(msg Message, index int) string {
 }
 
 func setResponseMessageID(msg *Message, item responseItem) {
-	if msg.ResponseID == "" && item.Type == "message" && item.ID != "" {
+	if item.Type != "message" {
+		return
+	}
+	if msg.ResponseID == "" && item.ID != "" {
 		msg.ResponseID = item.ID
+	}
+	if item.Phase != "" {
+		msg.ResponsePhase = item.Phase
 	}
 }
 

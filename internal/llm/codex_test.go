@@ -42,7 +42,7 @@ func TestCodexStreamRequestAndEvents(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"plan\"}\n\n")
-		fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg-1\"}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg-1\",\"phase\":\"commentary\"}}\n\n")
 		fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n")
 		fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc-1\",\"call_id\":\"call-1\",\"name\":\"bash\"}}\n\n")
 		fmt.Fprint(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"call_id\":\"call-1\",\"delta\":\"{\\\"command\\\":\\\"p\"}\n\n")
@@ -76,6 +76,9 @@ func TestCodexStreamRequestAndEvents(t *testing.T) {
 	}
 	if msg.ResponseID != "msg-1" {
 		t.Fatalf("response message ID = %q", msg.ResponseID)
+	}
+	if msg.ResponsePhase != "commentary" {
+		t.Fatalf("response message phase = %q", msg.ResponsePhase)
 	}
 	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].ID != "call-1" || msg.ToolCalls[0].Function.Name != "bash" || msg.ToolCalls[0].Function.Arguments != `{"command":"pwd"}` {
 		t.Fatalf("tool calls: %+v", msg.ToolCalls)
@@ -152,7 +155,7 @@ func TestCodexRequestUsesOutputMessageForAssistantHistory(t *testing.T) {
 		Messages: []Message{
 			{Role: "system", Content: "system prompt"},
 			{Role: "user", Content: "inspect the repository"},
-			{Role: "assistant", Content: "I will inspect it.", ResponseID: "msg-1", ToolCalls: []ToolCall{call}},
+			{Role: "assistant", Content: "I will inspect it.", ResponseID: "msg-1", ResponsePhase: "commentary", ToolCalls: []ToolCall{call}},
 			{Role: "tool", ToolCallID: "call-1", Content: "README contents"},
 		},
 	}, true)
@@ -182,6 +185,9 @@ func TestCodexRequestUsesOutputMessageForAssistantHistory(t *testing.T) {
 	}
 	if assistant["id"] != "msg-1" || assistant["status"] != "completed" {
 		t.Fatalf("assistant output identity = %#v", assistant)
+	}
+	if assistant["phase"] != "commentary" {
+		t.Fatalf("assistant output phase = %#v", assistant)
 	}
 	content, ok := assistant["content"].([]any)
 	if !ok || len(content) != 1 {
