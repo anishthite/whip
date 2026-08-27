@@ -129,6 +129,7 @@ Improvement plan with per-item checkboxes: [`.ai-docs/plans/mcp-polish/`](../.ai
 ## CLI surface
 
 - [x] Non-interactive one-shot mode: `whip run "prompt"` — reads piped stdin too, `--format json` emits the raw event stream for scripting (opencode `cli/cmd/run.ts`)
+- [ ] Protocol-first SDK: versioned JSONL events over `whip run`, then one thin client chosen for the first real consumer — research, options, safety constraints, and implementation plan in [`.ai-docs/plans/sdk/`](../.ai-docs/plans/sdk/README.md)
 - [x] `whip sessions` list subcommand
 - [x] Env markers in child processes (`WHIP=1`, `WHIP_SESSION_ID`) so scripts can detect they run under the agent (opencode sets `AGENT=1`, `OPENCODE_PID`)
 
