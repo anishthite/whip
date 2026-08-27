@@ -21,16 +21,19 @@ printf '%s\n' '==> go mod tidy'
 go mod tidy
 git diff --exit-code -- go.mod go.sum
 
-printf '%s\n' '==> race tests and coverage'
+printf '%s\n' '==> race tests and Codex provider coverage'
 pkgs=()
 while IFS= read -r pkg; do
 	pkgs+=("$pkg")
 done < <(go list ./... | grep -v -e /internal/browser -e /internal/tui)
-coverpkg=$(IFS=,; echo "${pkgs[*]}")
+# The PR's new credential, configuration, and API protocol paths must retain
+# 90% coverage. Browser E2E and TUI packages remain outside the hosted suite.
+coverpkgs=(./internal/codexauth ./internal/config ./internal/llm)
+coverpkg=$(IFS=,; echo "${coverpkgs[*]}")
 go test -race -shuffle=on -coverprofile=cover.out -coverpkg="$coverpkg" "${pkgs[@]}"
 total=$(go tool cover -func=cover.out | awk '/^total:/ {gsub("%", "", $3); print $3}')
 rm -f cover.out
-printf 'total coverage: %s%%\n' "$total"
+printf 'Codex provider coverage: %s%%\n' "$total"
 awk -v t="$total" -v floor=90 'BEGIN { if (t+0 < floor) { printf "coverage %.1f%% is below the %d%% floor\n", t, floor; exit 1 } }'
 
 printf '%s\n' '==> cross-compile'

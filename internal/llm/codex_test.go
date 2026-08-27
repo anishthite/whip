@@ -327,6 +327,58 @@ func TestCodexModelsReturnsHTTPError(t *testing.T) {
 	}
 }
 
+func TestCodexStreamErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{name: "HTTP error", status: http.StatusForbidden, body: "not entitled", want: "403 Forbidden"},
+		{name: "API error", status: http.StatusOK, body: "data: {\"type\":\"error\",\"error\":{\"message\":\"quota reached\"}}\n\n", want: "quota reached"},
+		{name: "failed response", status: http.StatusOK, body: "data: {\"type\":\"response.failed\"}\n\n", want: "codex response failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			_, _, err := NewCodex(srv.URL, codexSource(t)).Stream(context.Background(), Request{Model: "gpt-5.4"}, nil, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Stream error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexCompleteErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{name: "HTTP error", status: http.StatusUnauthorized, body: "sign in", want: "401 Unauthorized"},
+		{name: "invalid JSON", status: http.StatusOK, body: "not json", want: "invalid character"},
+		{name: "no text", status: http.StatusOK, body: `{"output":[{"type":"message","content":[{"type":"refusal","text":"no"}]}]}`, want: "no text"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			_, _, err := NewCodex(srv.URL, codexSource(t)).Complete(context.Background(), Request{Model: "gpt-5.4"})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Complete error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func codexSource(t *testing.T) *codexauth.Source {
 	t.Helper()
 	home := t.TempDir()

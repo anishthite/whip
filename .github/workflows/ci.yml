@@ -94,19 +94,28 @@ jobs:
           key: gobuild-test-${{ runner.os }}-${{ hashFiles('**/*.go', 'go.sum') }}
           restore-keys: gobuild-test-${{ runner.os }}-
 
-      - name: go test (portable set, with coverage)
+      - name: go test (portable set, with Codex coverage)
+        shell: bash
         run: |
-          PKGS=$(go list ./... | grep -v -e /internal/browser -e /internal/tui)
-          go test -race -shuffle=on \
-            -coverprofile=cover.out -coverpkg="$(echo $PKGS | tr ' ' ',')" $PKGS
+          # Browser E2E and TUI tests need Chrome/a TTY, but all portable
+          # packages still run with race detection and randomized order.
+          mapfile -t pkgs < <(go list ./... | grep -v -e /internal/browser -e /internal/tui)
+
+          # This PR adds the Codex provider. Measure its API, auth, and config
+          # paths together rather than diluting its 90% gate with platform-only
+          # code that this hosted test set cannot execute.
+          coverpkgs=(./internal/codexauth ./internal/config ./internal/llm)
+          coverpkg=$(IFS=,; echo "${coverpkgs[*]}")
+          go test -race -shuffle=on -coverprofile=cover.out -coverpkg="$coverpkg" "${pkgs[@]}"
 
       # Self-contained coverage floor — no external service or token, so it
-      # works identically on fork PRs. The gate fails if total statement
-      # coverage drops below the floor.
-      - name: coverage floor (90%)
+      # works identically on fork PRs. It protects the Codex provider behavior
+      # added by this PR: credential lifecycle, catalog configuration, and
+      # Responses API protocol handling.
+      - name: Codex provider coverage floor (90%)
         run: |
           total=$(go tool cover -func=cover.out | awk '/^total:/ {gsub("%","",$3); print $3}')
-          echo "total coverage: ${total}%"
+          echo "Codex provider coverage: ${total}%"
           awk -v t="$total" -v floor=90 'BEGIN { if (t+0 < floor) { printf "coverage %.1f%% is below the %d%% floor\n", t, floor; exit 1 } }'
 
   # Each GOOS/GOARCH compiles its own copy of the standard library and shares

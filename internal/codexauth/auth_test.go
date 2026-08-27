@@ -210,6 +210,69 @@ func TestDeviceLoginPersistsCodexCredentials(t *testing.T) {
 	}
 }
 
+func TestDeviceLoginProtocolHelpers(t *testing.T) {
+	now := time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		raw  json.RawMessage
+		want time.Time
+	}{
+		{name: "number", raw: json.RawMessage(`60`), want: now.Add(time.Minute)},
+		{name: "string", raw: json.RawMessage(`"120"`), want: now.Add(2 * time.Minute)},
+		{name: "zero", raw: json.RawMessage(`0`)},
+		{name: "invalid", raw: json.RawMessage(`"nope"`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := expiryFromDuration(tc.raw, now); !got.Equal(tc.want) {
+				t.Fatalf("expiryFromDuration(%s) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		raw  json.RawMessage
+		want time.Duration
+	}{
+		{name: "string", raw: json.RawMessage(`"2"`), want: 2 * time.Second},
+		{name: "zero", raw: json.RawMessage(`0`), want: time.Second},
+		{name: "invalid", raw: json.RawMessage(`"bad"`), want: time.Second},
+		{name: "capped", raw: json.RawMessage(`99999`), want: deviceLoginTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pollInterval(tc.raw); got != tc.want {
+				t.Fatalf("pollInterval(%s) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+	if _, ok := jwtClaims("not-a-jwt"); ok {
+		t.Fatal("invalid JWT was accepted")
+	}
+	if claims, ok := jwtClaims(jwt(t, now.Add(time.Hour), "account")); !ok || claims.Auth.ChatGPTAccountID != "account" {
+		t.Fatalf("JWT claims = %+v, ok=%t", claims, ok)
+	}
+}
+
+func TestDeviceLoginProtocolErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/accounts/deviceauth/usercode":
+			_, _ = w.Write([]byte(`{"device_auth_id":""}`))
+		case "/oauth/token":
+			_, _ = w.Write([]byte(`{"access_token":"only-access"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	source := Source{HTTP: srv.Client(), IssuerURL: srv.URL, TokenURL: srv.URL + "/oauth/token"}
+	if _, err := source.requestDeviceCode(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid server response") {
+		t.Fatalf("invalid device code error = %v", err)
+	}
+	if _, err := source.exchangeDeviceCode(context.Background(), "code", "verifier"); err == nil || !strings.Contains(err.Error(), "invalid server response") {
+		t.Fatalf("invalid token exchange error = %v", err)
+	}
+}
+
 func TestDeviceLoginUnsupported(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	defer srv.Close()

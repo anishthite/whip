@@ -10,7 +10,7 @@ Choose the check for the feedback you need:
 | Command | Use it when | What it runs |
 | --- | --- | --- |
 | `task ci` | Normal local development and pre-commit feedback | Formatting, vet, the full local test suite (including browser/TUI when your machine supports them), lint, and vulnerability scanning. |
-| `./scripts/ci-gh.sh` | You want to reproduce the portable GitHub Go/security gates before pushing | Formatting, vet, lint, tidy verification, race tests with shuffled order, the 90% coverage floor, release-target cross-compilation, and vulnerability scanning. It excludes browser/TUI tests because hosted Linux runners lack their Chrome/TTY requirements. |
+| `./scripts/ci-gh.sh` | You want to reproduce the portable GitHub Go/security gates before pushing | Formatting, vet, lint, tidy verification, race tests with shuffled order, the 90% Codex-provider coverage floor, release-target cross-compilation, and vulnerability scanning. It excludes browser/TUI tests because hosted Linux runners lack their Chrome/TTY requirements. |
 
 The separate macOS Swift-driver job still requires its GitHub runner or a local
 macOS driver build. `task lint-fix` auto-fixes what golangci-lint can. The
