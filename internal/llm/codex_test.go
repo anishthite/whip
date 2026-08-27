@@ -169,6 +169,13 @@ func TestCodexRequestUsesOutputMessageForAssistantHistory(t *testing.T) {
 	if len(input) != 4 {
 		t.Fatalf("input = %#v", input)
 	}
+	user := input[0].(map[string]any)
+	if user["role"] != "user" {
+		t.Fatalf("user input = %#v", user)
+	}
+	if _, ok := user["type"]; ok {
+		t.Fatalf("user input must not carry a type discriminator: %#v", user)
+	}
 	assistant := input[1].(map[string]any)
 	if assistant["type"] != "message" || assistant["role"] != "assistant" {
 		t.Fatalf("assistant history = %#v", assistant)

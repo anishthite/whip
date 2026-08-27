@@ -290,7 +290,7 @@ func codexRequest(req Request, stream bool) codexRequestBody {
 				}
 			}
 			if len(content) > 0 {
-				body.Input = append(body.Input, responseInputMessage{Type: "message", Role: "user", Content: content})
+				body.Input = append(body.Input, responseInputMessage{Role: "user", Content: content})
 			}
 		case "assistant":
 			if text := msg.TextContent(); text != "" {
@@ -375,7 +375,6 @@ func (m codexModel) ReasoningEfforts() []string {
 }
 
 type responseInputMessage struct {
-	Type    string                 `json:"type"`
 	Role    string                 `json:"role"`
 	Content []responseInputContent `json:"content"`
 }
