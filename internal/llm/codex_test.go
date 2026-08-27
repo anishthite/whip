@@ -60,7 +60,7 @@ func TestCodexStreamRequestAndEvents(t *testing.T) {
 		Messages: []Message{
 			{Role: "system", Content: "system prompt"},
 			{Role: "user", Content: "inspect the repository"},
-			{Role: "assistant", ToolCalls: []ToolCall{{ID: "old-call", Type: "function", Function: struct {
+			{Role: "assistant", ToolCalls: []ToolCall{{ID: "old-call", ItemID: "fc-old", Type: "function", Function: struct {
 				Name      string `json:"name"`
 				Arguments string `json:"arguments"`
 			}{Name: "read", Arguments: `{"path":"README.md"}`}}}},
@@ -214,6 +214,44 @@ func TestCodexMessageID(t *testing.T) {
 				t.Fatalf("codexMessageID = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCodexRequestFlattensLegacyToolHistory(t *testing.T) {
+	legacy := ToolCall{ID: "call-old", Type: "function"}
+	legacy.Function.Name = "read"
+	legacy.Function.Arguments = `{"path":"README.md"}`
+	body := codexRequest(Request{
+		Model: "gpt-5.6-terra",
+		Messages: []Message{
+			{Role: "user", Content: "inspect the repository"},
+			{Role: "assistant", ToolCalls: []ToolCall{legacy}},
+			{Role: "tool", ToolCallID: "call-old", Content: "README contents"},
+			{Role: "user", Content: "continue"},
+		},
+	}, true)
+
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	input := got["input"].([]any)
+	if len(input) != 3 {
+		t.Fatalf("input = %#v", input)
+	}
+	for _, item := range input {
+		message := item.(map[string]any)
+		if _, ok := message["type"]; ok {
+			t.Fatalf("legacy history must not emit native Responses items: %#v", message)
+		}
+	}
+	legacyContext := input[1].(map[string]any)["content"].([]any)[0].(map[string]any)["text"]
+	if legacyContext != "[Earlier tool activity]\n\n[Tool call]\nread({\"path\":\"README.md\"})\n\n[Tool result]\nREADME contents" {
+		t.Fatalf("legacy context = %q", legacyContext)
 	}
 }
 

@@ -272,8 +272,9 @@ func codexRequest(req Request, stream bool) codexRequestBody {
 		ParallelToolCalls: true,
 	}
 	var instructions []string
-	messageIndex := 0
-	for _, msg := range req.Messages {
+	messageIDIndex := 0
+	for messageIndex := 0; messageIndex < len(req.Messages); messageIndex++ {
+		msg := req.Messages[messageIndex]
 		if msg.Role == "system" {
 			instructions = append(instructions, msg.TextContent())
 			continue
@@ -300,7 +301,7 @@ func codexRequest(req Request, stream bool) codexRequestBody {
 				body.Input = append(body.Input, responseOutputMessage{
 					Type:   "message",
 					Role:   "assistant",
-					ID:     codexMessageID(msg, messageIndex),
+					ID:     codexMessageID(msg, messageIDIndex),
 					Status: "completed",
 					Content: []responseOutputText{{
 						Type:        "output_text",
@@ -308,6 +309,16 @@ func codexRequest(req Request, stream bool) codexRequestBody {
 						Annotations: []any{},
 					}},
 				})
+			}
+			if hasLegacyCodexToolCall(msg.ToolCalls) {
+				context, toolMessages := legacyCodexToolContext(msg.ToolCalls, req.Messages[messageIndex+1:])
+				body.Input = append(body.Input, responseInputMessage{
+					Role:    "user",
+					Content: []responseInputContent{{Type: "input_text", Text: context}},
+				})
+				messageIndex += toolMessages
+				messageIDIndex += toolMessages
+				break
 			}
 			for _, call := range msg.ToolCalls {
 				body.Input = append(body.Input, responseItem{
@@ -325,7 +336,7 @@ func codexRequest(req Request, stream bool) codexRequestBody {
 				Output: msg.Content,
 			})
 		}
-		messageIndex++
+		messageIDIndex++
 	}
 	body.Instructions = strings.Join(instructions, "\n\n")
 	if req.ReasoningEffort != "" {
@@ -342,6 +353,39 @@ func codexRequest(req Request, stream bool) codexRequestBody {
 		})
 	}
 	return body
+}
+
+// Codex will not replay a function call without its response-item ID. Sessions
+// written before Whip started preserving those IDs cannot recreate it, so keep
+// the useful tool activity as ordinary user context instead of sending an
+// invalid native function_call/function_call_output pair.
+func hasLegacyCodexToolCall(calls []ToolCall) bool {
+	for _, call := range calls {
+		if call.ItemID == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func legacyCodexToolContext(calls []ToolCall, following []Message) (string, int) {
+	var text strings.Builder
+	text.WriteString("[Earlier tool activity]")
+	for _, call := range calls {
+		text.WriteString("\n\n[Tool call]\n")
+		text.WriteString(call.Function.Name)
+		text.WriteString("(")
+		text.WriteString(call.Function.Arguments)
+		text.WriteString(")")
+	}
+	consumed := 0
+	for consumed < len(following) && following[consumed].Role == "tool" {
+		result := following[consumed]
+		text.WriteString("\n\n[Tool result]\n")
+		text.WriteString(result.Content)
+		consumed++
+	}
+	return text.String(), consumed
 }
 
 // codexModelsResponse is the subset of the Codex backend /models schema that
