@@ -35,6 +35,7 @@ import (
 	"github.com/context-labs/whip/internal/skills"
 	"github.com/context-labs/whip/internal/tools"
 	"github.com/context-labs/whip/internal/tools/bashrun"
+	"github.com/context-labs/whip/internal/update"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
@@ -55,10 +56,11 @@ var (
 
 // messages sent from the agent goroutine
 type (
-	textMsg      string
-	toolStartMsg struct{ id, name, args string }
-	toolEndMsg   struct{ id, name, result string }
-	steeredMsg   string
+	textMsg       string
+	toolStartMsg  struct{ id, name, args string }
+	toolEndMsg    struct{ id, name, result string }
+	toolOutputMsg struct{ id, text string } // partial output for a running tool row
+	steeredMsg    string
 )
 
 // goalFromContextMsg carries the model-formulated goal back from the
@@ -177,6 +179,10 @@ type model struct {
 	themeHow     string // how auto theme detection resolved (env var, OSC query, …) — captured at startup/theme change for /report; never re-queried
 	compactModel string // config model name for compaction summaries; "" = the built-in default
 	compactProv  string
+	// updateLatest is a pending newer release tag ("" when none), picked up
+	// from update.Pending at startup; the notice it renders is durable, so a
+	// check that lands after the report still shows next launch.
+	updateLatest string
 	effortX      int                       // screen column where the clickable ⚡ effort control starts
 	catalogs     map[string]config.Catalog // provider model lists (capabilities)
 	mcpMgr       *mcp.Manager              // MCP server connections; nil when none configured
@@ -379,6 +385,11 @@ func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string, ca
 			return "", err
 		}
 	}
+	// Pick up whatever the update check recorded: a notice from an earlier
+	// launch always shows; one discovered by main's background check shows
+	// this launch if its 1 RTT beats startup (first-run trust prompt), else
+	// next launch — the record is durable either way.
+	m.updateLatest = update.Pending(Version)
 	m.startupReport()
 
 	// Inline rendering (no alt-screen): the transcript lives in the normal
@@ -499,6 +510,10 @@ func (m *model) startupReport() {
 		if len(parts) > 0 {
 			line("mcp: %s", strings.Join(parts, " · "))
 		}
+	}
+	if m.updateLatest != "" {
+		line("update available: %s (run: whip update)", m.updateLatest)
+		warned = true
 	}
 	if b.Len() == 0 {
 		return
@@ -1027,6 +1042,9 @@ type block struct {
 	toolID      string
 	toolRunning bool
 	toolFailed  bool
+	// live is the latest partial-output snapshot for a running bash call,
+	// rendered under the verb line; cleared when the tool ends.
+	live string
 	// y0/y1 are the block's line range in the last rendered content (set by
 	// refreshVP); used to map a mouse click to the block under it.
 	y0, y1 int
@@ -1085,9 +1103,13 @@ func (b block) render(width int) string {
 		hint := fmt.Sprintf("\n  … +%d lines (ctrl+e or click to expand)", len(lines)-toolPreviewLines)
 		return wrap(out+dimStyle.Render(hint), width)
 	case blockToolRun:
-		// While running, the verb line shows in full. On completion the same
-		// block collapses in place to one line (red on failure); ctrl+e expands.
+		// While running, the verb line shows in full with the live output
+		// tail under it. On completion the same block collapses in place to
+		// one line (red on failure); ctrl+e expands.
 		if b.toolRunning || b.expanded {
+			if b.live != "" && b.toolRunning {
+				return wrap(b.text, width) + "\n" + wrap(dimStyle.Render("  "+b.live), width)
+			}
 			return wrap(b.text, width)
 		}
 		line := ansi.Truncate(b.text, width, "…")
@@ -1692,6 +1714,23 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshVP()
 		return m, nil
 
+	case toolOutputMsg:
+		// partial output for a running bash row: show the tail of what's
+		// arrived so far under the verb line. toolEndMsg replaces it with
+		// the final collapsed row, so no truncation bookkeeping here.
+		for i := len(m.blocks) - 1; i >= 0; i-- {
+			b := &m.blocks[i]
+			if b.kind == blockToolRun && b.toolRunning && b.toolID == msg.id {
+				if tail := lastLines(msg.text, 3); tail != "" {
+					b.live = tail
+					b.stale = true
+					m.refreshVP()
+				}
+				break
+			}
+		}
+		return m, nil
+
 	case toolEndMsg:
 		// store the raw result; render collapses to a preview (ctrl+e /
 		// click expands) and re-wraps on resize
@@ -1703,6 +1742,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if b.kind == blockToolRun && b.toolRunning && b.toolID == msg.id {
 				b.toolRunning = false
 				b.toolFailed = strings.HasPrefix(msg.result, "Error:")
+				b.live = ""
 				b.text = toolStyle.Render("⚒ "+msg.name+" ") + dimStyle.Render(firstLine(msg.result))
 				b.stale = true
 				break
@@ -3187,6 +3227,10 @@ func (m *model) submitTurn(text string, authored bool) (tea.Model, tea.Cmd) {
 				send(toolStartMsg{id, n, a})
 			},
 			OnToolEnd: func(id, n, r string) { send(toolEndMsg{id, n, r}) },
+			// Detached send: snapshots are lossy progress, and a parked
+			// p.Send must never wedge bashrun's ticker goroutine (the ABBA
+			// lesson from docs/concurrency.md — same rule as sendTaskMsg).
+			OnToolOutput: func(id, soFar string) { go send(toolOutputMsg{id, soFar}) },
 			OnSteer: func(s string) {
 				flush()
 				send(steeredMsg(s))

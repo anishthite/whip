@@ -34,6 +34,42 @@ Tests: `parallel_test.go` — `TestToolCallsRunInParallel` (overlap measured via
 a concurrency counter), `TestSamePathEditsSerialize`, `TestToolMutationPath`,
 `TestCanonicalPathKey`.
 
+### Bash output feedback: live streaming + truncation spill
+
+Two ways a bash command stops being a black box (pi's bash tool has both):
+
+- **Streamed partial output.** `bashrun.Options.OnUpdate` reports the
+  accumulated combined stdout/stderr at most every 100ms
+  (`bashrun.updateInterval`) from a snapshot ticker goroutine owned by the
+  run — it snapshots the shared buffer under the drains' mutex and exits on a
+  done-channel close when `runPiped` returns (one trailing tick may land after
+  return; the TUI's `toolRunning` check makes it a no-op). The TUI callback
+  uses a detached `go p.Send(...)`, so a wedged UI queue can never park the
+  ticker goroutine (docs/concurrency.md's ABBA rule). The bash
+  tool receives the callback through a **per-call context value**
+  (`tools.WithOnUpdate`), not a package var, so parallel tool calls can't
+  cross wires; `agent.runTools` attaches it when `Events.OnToolOutput` is set
+  and the call is bash. The TUI (`toolOutputMsg`) renders the last three
+  non-empty lines under the running tool row's verb line (`block.live`);
+  `toolEndMsg` clears it and collapses the row as before. The final output
+  still arrives via the tool result — snapshots are progress, never state.
+- **Truncation spill.** When combined output exceeds `maxOutput` (50KB) and
+  `TruncateTail` fires, `bashrun.Spill` writes the **full** bytes to
+  `$TMPDIR/whip-bash-<pid>/*.log` (0600, OS-reaped) and the tool result
+  appends `[full output (N bytes): <path>]` so the model can read/grep the
+  head it never saw. Spill failure degrades silently — a broken temp dir must
+  not cost the tool result.
+
+Tests: `internal/tools/bashrun/feedback_test.go` — `TestOnUpdateThrottle`
+(≥95ms between fires, prefix-growing snapshots), `TestOnUpdateNil`,
+`TestOnUpdateFastCommand`, `TestSpill` (content round-trip + 0600 perms);
+`internal/tools/bash_feedback_test.go` — `TestBashToolSpillOnTruncation`
+(notice + file holds the truncated-away head), `TestBashToolNoSpillUnderCap`,
+`TestBashToolOnUpdateCtx`; `internal/agent/tool_output_test.go` —
+`TestOnToolOutputStreamsBash` (event carries the tool-call id, fires mid-run);
+`internal/tui/tool_output_test.go` — `TestToolOutputMsgUpdatesRunningRow`
+(unknown id ignored, tail replaces, end clears), `TestLastLines`.
+
 ### Compaction
 
 When the conversation fills the context window, old turns fold into an
@@ -444,6 +480,34 @@ prompts, killed after 15s of no input.
 
 Tests: `killall_test.go` — `TestKillAllReapsChildren` (kills a live `sleep 60`),
 `TestBackgroundGrandchildDoesNotHang`.
+
+## Update check
+
+`internal/update/update.go` — on interactive startup `main` fires
+`update.Check(version)` in a goroutine, concurrent with the trust prompt and
+agent setup, so its ~1 RTT is usually free: when the check wins, the notice
+shows in that very startup report; when startup wins, the recorded notice is
+durable and shows next launch.
+
+The check reads `~/.whip/update.json` first and skips the network when a
+notice is pending for a release not yet installed (never nags twice about the
+same version) or the last check is under 24h old. Otherwise it GETs
+`api.github.com/.../releases/latest` (2s timeout, `gh` token / `GH_TOKEN`
+auth mirroring `install.sh` while the repo is private), and a strictly newer
+semver (prereleases sort before their release) is written to the notice file
+atomically (tmp+rename). The startup report shows `update available: vX.Y.Z
+(run: whip update)`; a successful `whip update` calls `update.Acknowledge()`
+so an installed release stops nagging — and a user who updates out of band
+(curl|sh) has the now-stale notice cleared on next launch, so checks resume.
+`dev` builds never check. Every failure — offline, rate-limited, corrupt
+notice — is silent by design: a version check must never break startup.
+
+Tests: `internal/update/update_test.go` (`TestCheckNewerRelease`,
+`TestCheckSkips` — pending notice / fresh TTL / dev build never fetch,
+`TestCheckStaleTTLRefetches`, `TestCheckOutOfBandUpdate` clears the stale
+notice of a curl|sh updater, `TestCheckFetchFailure` still records the
+attempt, `TestCheckCorruptNotice`, `TestNewer`, `TestPendingAndAcknowledge`);
+`tui/startup_report_test.go` (`TestStartupReportUpdateNotice`).
 
 ## LSP diagnostics
 
