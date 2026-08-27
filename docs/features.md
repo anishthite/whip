@@ -279,8 +279,8 @@ relay: full device login + key mint, store round-trip, key validation),
   `/theme`/ctrl+p. `internal/theme` loads JSONC files, keeps `auto`/`light`/
   `dark` as built-ins, and `tui.go` maps the resolved `StyleSet` onto the six
   transcript styles without changing persisted session data. Tests:
-  `internal/theme/theme_test.go`, `theme_cmd_test.go`, existing markdown/theme
-  contrast tests.
+  `internal/theme/theme_test.go`, `internal/tui/theme_cmd_test.go`, existing
+  markdown/theme contrast tests.
 - **Mouse**: `/mouse` toggles capture; with capture off the terminal's native
   selection works, with it on shift-drag selects. `"mouse": false` in config
   disables capture at startup.
