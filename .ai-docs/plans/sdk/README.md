@@ -1,15 +1,17 @@
 # SDK: a stable programmatic boundary for whip
 
 Branch: `tripoli`
-Status: RESEARCHED — protocol-first plan recommended; awaiting sign-off before
-implementation.
+Status: RESEARCHED — consumer-first path selection recommended; awaiting
+sign-off before implementation.
 
 ## What this does
 
 Defines how applications should drive whip without copying its agent loop or
-depending on packages under `internal/`. The recommended first SDK is a stable,
-versioned JSON Lines protocol over the existing `whip run` subprocess, followed
-by one thin client library chosen for the first real consumer.
+depending on packages under `internal/`. There are two credible first products:
+a narrow native Go facade for an embedded Go consumer, or a stable, versioned
+JSON Lines protocol over `whip run` for process and non-Go consumers. The first
+committed integration should select between them; do not build both
+speculatively.
 
 This document is research and planning only. It does not establish a public API
 or commit the project to supporting every option described below.
@@ -23,10 +25,12 @@ Let a trusted local application:
 - consume typed streaming events in order;
 - cancel or time-limit the run;
 - receive the final text, usage, session id, and structured failure;
-- detect protocol/binary incompatibility before starting work.
+- use a documented compatibility boundary rather than internal Go types.
 
-The first implementation should reuse the installed whip binary and its existing
-config, provider authentication, agent loop, tools, and SQLite session store.
+The first implementation should reuse whip's existing config, provider
+authentication, agent loop, tools, and SQLite session store. A process client
+does that through the installed binary; an embedded Go client does it through a
+small public facade and shared internal construction code.
 
 ## Non-goals
 
@@ -35,16 +39,21 @@ config, provider authentication, agent loop, tools, and SQLite session store.
 - A general plugin runtime; MCP remains the extension boundary.
 - Exposing `internal/agent.Agent`, `internal/llm.Message`, or the SQLite schema as
   public compatibility surfaces.
-- Host-language custom tool callbacks in v1. They require bidirectional IPC, not
-  the one-way event stream proposed here.
+- Host-language custom tool callbacks in a subprocess v1. They require
+  bidirectional IPC; a native Go facade can support them after it has a public
+  tool adapter.
 - TUI feature parity. The SDK v1 capability profile is explicit and may be
   smaller than an interactive session.
 - A sandbox. A subprocess boundary isolates Go globals, not filesystem or shell
   access; callers remain responsible for workspace isolation.
-- Long-lived background subagents. A one-shot process cannot promise that a
-  `task` with `background:true` survives the foreground turn.
+- Long-lived background subagents in a one-shot process. It cannot promise that
+  a `task` with `background:true` survives the foreground turn.
 - Publishing TypeScript and Python clients simultaneously before there is a
   known consumer for both.
+- Migrating the TUI onto the SDK merely to prove the facade. The TUI is allowed
+  to remain a first-party client of internal capabilities.
+- Treating message replacement as rewind/fork. Those TUI operations also own
+  redo state, persistence, transcripts, and workspace snapshots.
 
 ## Working definition of “SDK”
 
@@ -55,10 +64,10 @@ There are four distinct requests hiding behind that word:
 3. **Host whip** — expose persistent sessions to local or remote clients.
 4. **Extend whip** — add tools and capabilities.
 
-The recommendation in this plan addresses (1). A native Go API addresses (2),
-an HTTP service addresses (3), and MCP already addresses most of (4). Treating
-them as separate products keeps the first SDK small and avoids designing a
-daemon or plugin system accidentally.
+This plan evaluates both (1) and (2), but recommends implementing only the one
+required by the first consumer. An HTTP service addresses (3), and MCP already
+addresses most of (4). Treating them as separate products keeps the first SDK
+small and avoids designing a daemon or plugin system accidentally.
 
 ## Current state
 
@@ -98,6 +107,39 @@ bash, and suggestions. Working-directory behavior also relies on `os.Getwd`
 and `os.Chdir`. Two embedded clients could therefore affect each other even if
 the public package merely wrapped `Agent`.
 
+## Two internal surfaces are currently welded together
+
+A useful distinction is between the turn engine and the session editor. A scan
+of the current TUI found direct `m.agent` references on 127 non-test source
+lines. That count is not itself a reason to migrate the TUI; it identifies
+which behavior should not accidentally become the SDK contract.
+
+| Surface | Current shape | Initial SDK treatment |
+| --- | --- | --- |
+| Turn engine | `Turn`, `Steer`, usage snapshots, and event callbacks form a coherent headless operation. Tool callbacks may arrive concurrently from parallel tool goroutines. | Wrap this. Give it public input/result/event types and one serialized event stream. |
+| Session editing | The TUI directly changes messages, model, effort, context limits, compaction settings, and provenance, while coordinating database rows, redo state, transcripts, and workspace snapshots. | Keep internal. Add narrow verbs only when a real embedded consumer needs them. Do not expose mutable fields or raw internal messages. |
+
+This permits a smaller native SDK than a full `Agent` cleanup. The TUI can keep
+using the richer internal object while the facade initially supports only a
+turn-oriented contract. However, the facade still needs more than a one-file
+wrapper: public adapters cannot leak `internal` types, construction logic is
+currently split across CLI/TUI code, event delivery must serialize concurrent
+callbacks, and global tool/workspace state needs an explicit lifecycle policy.
+
+For an initial single embedded consumer, the lifecycle policy can be a clearly
+documented ceiling rather than an immediate architectural rewrite: one engine
+per process, one active turn per session, and host-owned process working
+directory. If the consumer requires multiple independent engines or workspaces
+in one process, per-engine tool dependencies and workspace roots become
+prerequisites rather than follow-up cleanup.
+
+Illustrative wrapper signatures must also be checked against the current tree:
+`Agent.Client` is an `llm.Client` interface, tool start/end callbacks include a
+call id, `Events` includes compaction and retry callbacks, and tool callbacks
+can run concurrently. The current `whip run --format json` already provides the
+subprocess option in prototype form. The remaining work is to stabilize and
+complete that boundary, not create it from zero.
+
 ## Prior art already in the repository
 
 ### opencode
@@ -133,7 +175,7 @@ caller already owns.
 
 ## Options
 
-### Option A — versioned CLI protocol plus a thin client (recommended)
+### Option A — versioned CLI protocol plus a thin client
 
 Add a `json-v1` output mode to `whip run`, then wrap `os/exec`/`subprocess` in
 one client library. Each run gets process isolation, while whip continues to
@@ -161,14 +203,21 @@ Costs and ceilings:
 ### Option B — native Go SDK
 
 Expose a narrow package from the module root, for example `whip.New(...)`, with
-concrete `Engine`, `Session`, `Event`, and `Result` types and small consumer-side
-interfaces for providers, tools, storage, and permissions.
+concrete `Client`, `Run`, `Event`, and `Result` types. Start with turn-engine
+operations rather than trying to make the mutable internal `Agent` public.
 
 This is the right product if the first consumer is a Go application that needs
-custom in-process providers or tools. It is not a package-visibility change:
-the implementation must first move all tool hooks and workspace state behind
-per-engine dependencies, make capabilities opt-in, close resources explicitly,
-and define whether multiple turns or sessions may run concurrently.
+in-process control or custom providers/tools. The smallest safe version may
+document one client per process and host-owned CWD instead of first moving every
+global behind per-engine dependencies. It must still make capabilities opt-in,
+close owned resources explicitly, adapt internal values into public types, and
+reject unsupported concurrency. Multiple independent engines or workspace
+roots require the larger per-instance dependency refactor before release.
+
+Add session-editing verbs only from concrete requirements. Plausible examples
+are `SetEffort`, `SetModel`, `History`, and `Compact`; a raw `ReplaceHistory`
+method is not a substitute for the TUI's durable rewind/fork behavior. Prefer
+verbs that preserve invariants over exposing fields or slices.
 
 Do not export the current `Agent` directly. Its mutable public fields, internal
 message model, automatic tool installation, and global collaborators are an
@@ -196,9 +245,21 @@ an application to create or drive whip sessions.
 
 ## Decision
 
-Start with Option A. It stops at the first ponytail rung that holds: the
-headless command and event source already exist, and the subprocess boundary
-contains the globals that make native embedding unsafe.
+Do not select a transport until the first consuming application is named. Then
+choose exactly one initial path:
+
+| First consumer requirement | Start with | Why |
+| --- | --- | --- |
+| CI, scripts, another language, or strong process isolation | Option A | `whip run` already provides the lifecycle boundary and contains package globals/CWD. |
+| A Go application needing in-process control or host callbacks | Option B | A subprocess wrapper would omit the capability that motivated the SDK. |
+| Several persistent or remote clients | Option C, after a threat/lifecycle design | Neither a one-shot process nor a single-engine facade meets the requirement. |
+| Only adding tools to whip | Option D | MCP is already the extension boundary. |
+
+Absent a committed embedded-Go consumer, Option A remains the lower-risk
+default: the headless command and event source already exist, and the process
+boundary contains the globals that make native embedding unsafe. Conversely,
+if the first consumer is embedded Go, building JSONL first would create an
+intermediate product it may never use.
 
 Re-evaluate only when a concrete consumer requires one of these capabilities:
 
@@ -210,7 +271,7 @@ Re-evaluate only when a concrete consumer requires one of these capabilities:
   attach.
 - **Additional client language:** a real adopter cannot use the first client.
 
-## Recommended v1 protocol
+## Option A candidate: versioned JSONL protocol
 
 ### Transport
 
@@ -286,7 +347,7 @@ legacy `--format json` unchanged during v1 introduction; scripts may already
 depend on its current shapes. A future release may alias `json` to the
 versioned format only through an explicit deprecation cycle.
 
-## Client shape
+### Option A client shape
 
 The client should remain a process wrapper, not a second implementation of
 whip configuration or session semantics:
@@ -319,25 +380,84 @@ Python tooling to this Go repository speculatively. The protocol and its
 conformance fixtures live here; a language package can live here or in its own
 repository once its release and ownership model are known.
 
+## Option B candidate: narrow native Go facade
+
+Prefer the module-root package `github.com/context-labs/whip` over a generic
+`sdk` subpackage. The facade should expose public concrete values and translate
+to internal agent/config/message types rather than exporting them indirectly.
+The first API sketch is intentionally turn-shaped:
+
+```go
+client, err := whip.New(whip.WithConfigFile(path))
+if err != nil { /* ... */ }
+defer client.Close()
+
+run, err := client.Turn(ctx, whip.TurnRequest{Prompt: prompt})
+if err != nil { /* ... */ }
+
+for event := range run.Events() {
+    // Event is a public tagged value; tool callbacks are serialized here.
+}
+result, err := run.Wait()
+```
+
+Exact names wait for the first integration, but the contract should preserve
+these properties:
+
+- construction reuses one shared internal builder also used by the binary;
+- `Turn` returns a run handle with a bounded, single-writer event stream;
+- cancellation is context-based and `Close` is idempotent;
+- public results, usage, errors, events, and tool descriptors contain no
+  `internal/...` types;
+- one active turn per client/session is enforced until concurrency semantics
+  are intentionally designed;
+- a second client in the same process fails clearly while process-global tool
+  hooks remain; it must not silently overwrite the first client's callbacks;
+- the host owns CWD in the constrained version. Do not call `os.Chdir` from a
+  library. A per-client workspace option requires refactoring tool path
+  resolution around an explicit root first;
+- custom tools/providers are added only if required by the first consumer, via
+  small public interfaces and adapters rather than exposing registries;
+- session-editing methods are verbs with defined persistence semantics. A
+  memory-only `History`/`Compact` surface may be valid; `Rewind` or `Fork` must
+  account for durable TUI state before claiming those names.
+
+This facade is narrower than migrating the TUI. It can be useful with a
+documented single-engine ceiling, but it is not merely a roughly 50-line
+wrapper: extracting shared construction, adapting types, guarding globals,
+serializing events, and testing lifecycle behavior are part of the minimum
+product.
+
 ## Capability and safety model
 
 The current headless command is for trusted automation. SDK naming and defaults
 must not imply sandboxing or interactive approval that does not exist.
 
-For v1:
+For either initial path:
 
 - the start event reports the exact enabled tool/capability names;
 - browser and computer-use are disabled unless explicitly requested and wired;
-- background subagents are disabled or reject `background:true` with tool
-  output explaining the one-shot lifecycle;
 - clients must opt into mutating tool execution with an unmistakable setting;
 - the workspace is explicit, but absolute reads and shell behavior remain host
   capabilities unless a separate sandbox is supplied;
 - secrets stay in whip's config/provider layer and never enter events or client
-  configuration by default;
+  configuration by default.
+
+For Option A specifically:
+
+- background subagents are disabled or reject `background:true` with tool
+  output explaining the one-shot lifecycle;
 - when persistence is requested, open/create/load/save failures become
   `persistence` run failures. `run.completed` with a session id guarantees that
   the completed turn was saved; the legacy format may retain best-effort saves.
+
+For Option B specifically:
+
+- the single-engine/process and host-owned-CWD constraints are checked and
+  documented until the underlying globals are removed;
+- `Close` releases every resource and global lease acquired by the client;
+- embedded callers receive the same explicit capability profile as process
+  callers rather than inheriting TUI defaults accidentally.
 
 A read-only profile may be added, but it must be described as a tool allowlist,
 not a filesystem sandbox: even reading can escape the workspace unless path
@@ -345,7 +465,18 @@ enforcement is separately implemented.
 
 ## Surfaces and likely implementation files
 
-### Phase 1 — stable protocol in the binary
+### Selection gate — shared by both paths
+
+- Name the consuming application and language.
+- Write down its minimum capability set: session resume, custom tools/providers,
+  MCP/skills/LSP/browser parity, permission callbacks, and process-isolation
+  needs.
+- Decide whether it can accept one engine/process, one turn/session, and
+  host-owned CWD.
+- Choose Option A or Option B. Do not start implementation while the answer is
+  “a generic SDK for future consumers.”
+
+### Path A — stable protocol and first thin client
 
 - `internal/protocol/` (new): versioned envelope, event payload types, stable
   error codes, and the single-writer stream.
@@ -356,22 +487,34 @@ enforcement is separately implemented.
   concurrent-tool stream tests.
 - `internal/agent/task.go`: explicitly reject or disable background mode for
   the one-shot capability profile.
-- `docs/features.md`: document the versioned machine interface after it ships.
-- `docs/roadmap.md`: check the SDK item only when the protocol and first client
-  are both usable.
+- Client package/repository chosen by the first consumer: async parsing,
+  cancellation, binary discovery, session resume, compatibility validation,
+  conformance fixtures, and one runnable example.
 
-### Phase 2 — first thin client
+### Path B — constrained native Go facade
 
-- client package/repository chosen by the first consumer;
-- async stream parser, cancellation, timeout, binary discovery, session resume,
-  and compatibility validation;
-- conformance tests consuming protocol fixtures produced by Phase 1;
-- one runnable example against a fake provider or isolated test configuration.
+- module-root Go files (new package `whip`): options, `Client`, turn request,
+  run handle, public event/result/error types, lifecycle guard, and adapters;
+- a new focused internal construction package: share config/provider/agent/tool
+  setup that is currently split between `cmd/whip/run.go` and
+  `internal/tui.buildAgent` without importing either UI package;
+- `internal/agent`: add only the invariant-preserving verbs required by the
+  first consumer; do not expose mutable messages or configuration fields;
+- event adapter: copy callback data into public values and serialize callbacks
+  from parallel tool goroutines through a bounded channel;
+- lifecycle: enforce one client per process while global hooks exist, reject a
+  second constructor, and release the lease/resources in `Close`;
+- workspace: use the host's stable CWD for the constrained release, or first
+  refactor tools to accept an explicit root if per-client workspaces are a hard
+  requirement;
+- `example_test.go` or `examples/`: one runnable consumer flow using a fake or
+  isolated provider.
 
-### Phase 3 — only if demanded
+### Later — only if demanded
 
 - bidirectional stdio for permission responses and host-language tools;
-- native Go facade after per-instance dependency refactoring; or
+- removal of the native single-engine/CWD ceiling through per-instance tool and
+  workspace dependencies; or
 - local HTTP/SSE service after lifecycle and threat-model design.
 
 ## Test plan
@@ -411,53 +554,79 @@ enforcement is separately implemented.
 - cancellation is safe before start, during streaming, and after completion;
 - refuses concurrent turns on the same session object.
 
+### Native facade tests
+
+- no exported signature contains a type from `internal/...`;
+- constructor failure releases partially acquired resources and the global
+  engine lease;
+- a second simultaneous client fails deterministically while globals remain;
+- `Close` is idempotent and permits a later client;
+- parallel tool callbacks yield ordered, race-free public events;
+- cancellation closes events and completes `Wait` without a goroutine leak;
+- unsupported concurrent turns return a stable error;
+- public history/results are defensive copies, not aliases of agent slices;
+- the library never changes process CWD;
+- any added session-editing verb preserves its documented persistence behavior.
+
 ### Gates
 
 - `task check` for each implementation phase;
 - `go test -race ./cmd/whip ./internal/agent ./internal/protocol` for the
-  protocol phase;
+  protocol path;
 - the client language's formatter, type checker, unit tests, and one
-  binary-level smoke test for the client phase.
+  binary-level smoke test for the process-client path;
+- `go test -race ./...` plus a small external-package compile test for the
+  native facade path.
 
 ## Documentation plan
 
 When implementation ships:
 
-- add the machine-readable run contract, compatibility policy, and safety
-  warning to `docs/features.md` and the CLI/config reference;
+- document the selected boundary, compatibility policy, capability profile,
+  concurrency ceiling, and safety warning in `docs/features.md`;
 - add one minimal streaming example for the first client;
-- document binary-version compatibility and how upgrades are handled;
-- document that the default transport is local subprocess IPC, not a sandbox or
-  remote service;
-- check the SDK roadmap item only after both the protocol and one client are
-  released.
+- for Option A, document binary/protocol compatibility and that local
+  subprocess IPC is not a sandbox or remote service;
+- for Option B, document source compatibility, the single-engine/CWD limits,
+  ownership, and `Close` behavior;
+- check the SDK roadmap item only after the selected boundary and its first
+  usable consumer package are released.
 
 README changes wait until users can install a client package; this research PR
 does not advertise an unshipped SDK.
 
 ## Ordered task breakdown
 
-1. [ ] Confirm the first client language and consuming application.
-2. [ ] Confirm v1's enabled tool profile and mutating-tool opt-in name.
-3. [ ] Add protocol types, stable error codes, and the bounded single-writer
-       event stream.
-4. [ ] Add `--format json-v1` and adapt the full `agent.Events` surface.
-5. [ ] Make one-shot background-task behavior explicit and test it.
-6. [ ] Add protocol compatibility, ordering, concurrency, resume, cancellation,
-       and legacy-format tests.
-7. [ ] Run `task check` and the focused race suite.
-8. [ ] Build the first thin client against conformance fixtures.
-9. [ ] Add a binary smoke test and runnable client example.
-10. [ ] Update shipped-feature docs and check the roadmap item.
-11. [ ] Re-evaluate native Go, bidirectional stdio, and HTTP service only from
-        concrete unmet requirements reported by the first consumer.
+1. [ ] Confirm the consuming application, language, and minimum capability set.
+2. [ ] Choose Path A (process protocol) or Path B (native Go); record why the
+       other path does not meet the first consumer as directly.
+3. [ ] Confirm the enabled tool profile and mutating-tool opt-in name.
+4. [ ] If Path A: add the versioned single-writer protocol and full event
+       adapter, make one-shot background behavior explicit, and preserve the
+       legacy format.
+5. [ ] If Path A: add ordering/concurrency/resume/cancellation compatibility
+       tests, then build the first thin client from conformance fixtures.
+6. [ ] If Path B: extract shared construction and add the module-root facade,
+       public type adapters, bounded event stream, and global lifecycle guard.
+7. [ ] If Path B: add only consumer-required session/tool/provider verbs and
+       tests for races, ownership, concurrency rejection, CWD, and cleanup.
+8. [ ] Run `task check` and the selected path's race/integration suite.
+9. [ ] Add a runnable example and shipped-feature documentation.
+10. [ ] Check the roadmap item after the selected SDK is usable by its first
+        consumer.
+11. [ ] Re-evaluate the unselected path, bidirectional stdio, or HTTP only from
+        concrete unmet requirements.
 
 ## Open questions for sign-off
 
 1. Which application will consume the SDK first, and in what language?
-2. Should SDK v1 expose the current trusted coding-tool profile, or require a
+2. Does it require in-process custom tools/providers, or is a managed `whip`
+   subprocess acceptable?
+3. If it is embedded Go, can it accept one engine/process, one turn/session,
+   and host-owned CWD for the first release?
+4. Should SDK v1 expose the current trusted coding-tool profile, or require a
    smaller allowlist unless the client explicitly opts into mutations?
-3. Does the first consumer need MCP/skills/LSP parity with the TUI, or is the
+5. Does the first consumer need MCP/skills/LSP parity with the TUI, or is the
    current `whip run` capability set the intended product?
-4. Is session resume through the shared SQLite store sufficient, or does the
+6. Is session resume through the shared SQLite store sufficient, or does the
    consumer require an in-memory multi-turn process?
