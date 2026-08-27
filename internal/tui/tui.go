@@ -3800,28 +3800,6 @@ func (m *model) viewBody() string {
 // directory, model (effort), provider, and session token spend. It mirrors
 // the header's data but stays put while the transcript scrolls, so the four
 // facts are always visible no matter where the viewport sits.
-func (m *model) tpsGauge() string {
-	if !m.busy || m.tpsTracker == nil || m.cfg == nil {
-		return ""
-	}
-	style := m.cfg.TPSGauge
-	if style == "" {
-		style = "tach"
-	}
-	snap := m.tpsTracker.Snapshot()
-	switch style {
-	case "bar":
-		return tps.RenderBar(snap)
-	case "tach":
-		return tps.RenderTach(snap)
-	case "spark":
-		return tps.RenderSparkline(snap)
-	case "lights":
-		return tps.RenderShiftLights(snap)
-	}
-	return ""
-}
-
 func (m *model) statusView() string {
 	model := m.modelName
 	if e := effortLabel(m.agent.Effort); e != "off" {

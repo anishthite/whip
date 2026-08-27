@@ -18,6 +18,9 @@ import (
 func statusModel() *model {
 	m := newGrowModel()
 	m.agent = &agent.Agent{}
+	m.width = 180
+	m.input.SetWidth(m.width - 2)
+	m.layout()
 	return m
 }
 
