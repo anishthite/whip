@@ -27,7 +27,7 @@ func TestAuthCodexShowsDeviceInstructions(t *testing.T) {
 		case "/oauth/token":
 			w.Write([]byte(`{"access_token":"new-access","refresh_token":"new-refresh","id_token":"` + testJWT(t, expires, "account") + `"}`))
 		case "/codex/models":
-			if r.Header.Get("Authorization") != "Bearer new-access" || r.Header.Get("ChatGPT-Account-ID") != "account" {
+			if r.Header.Get("Authorization") != "Bearer new-access" || r.Header.Get("Chatgpt-Account-Id") != "account" {
 				http.Error(w, "missing Codex auth", http.StatusUnauthorized)
 				return
 			}
