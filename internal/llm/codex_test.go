@@ -300,7 +300,7 @@ func TestCodexModelsFetchesAccountCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotHeaders.Get("Authorization") != "Bearer access" || gotHeaders.Get("ChatGPT-Account-ID") != "account" || gotHeaders.Get("Originator") != "whip" {
+	if gotHeaders.Get("Authorization") != "Bearer access" || gotHeaders.Get("Chatgpt-Account-Id") != "account" || gotHeaders.Get("Originator") != "whip" {
 		t.Fatalf("catalog auth headers = %#v", gotHeaders)
 	}
 	if len(models) != 2 {

@@ -11,7 +11,7 @@ package computer
 
 import (
 	_ "embed"
-	"fmt"
+	"errors"
 	"os"
 	"path/filepath"
 )
@@ -51,15 +51,18 @@ func ensureHelperBinary() (string, error) {
 				return abs, nil
 			}
 		}
-		return "", fmt.Errorf("no whip-computer helper embedded and none built — run `task driver` (macOS, needs Xcode CLT)")
+		return "", errors.New("no whip-computer helper embedded and none built — run `task driver` (macOS, needs Xcode CLT)")
 	}
+	//nolint:gosec // destination is derived by helperDest from the current user's home directory.
 	if existing, err := os.ReadFile(dest); err == nil && bytesEqual(existing, helperBinary) {
 		return dest, nil
 	}
+	//nolint:gosec // executable helper directory must be traversable to launch its contents.
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return "", err
 	}
 	tmp := dest + ".tmp"
+	//nolint:gosec // this is an executable helper binary, so it requires execute permission.
 	if err := os.WriteFile(tmp, helperBinary, 0o755); err != nil {
 		return "", err
 	}

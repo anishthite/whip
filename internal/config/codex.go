@@ -1,5 +1,7 @@
 package config
 
+import "slices"
+
 // Codex uses ChatGPT subscription credentials from ~/.codex/auth.json rather
 // than an API key. Its account-scoped catalog augments this fixed fallback
 // route after login, so these limits keep the provider usable if that fetch is
@@ -45,10 +47,5 @@ func (c *Config) UpsertCodex() {
 }
 
 func hasProvider(providers []string, want string) bool {
-	for _, provider := range providers {
-		if provider == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(providers, want)
 }

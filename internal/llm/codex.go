@@ -26,8 +26,10 @@ type Codex struct {
 // codexModelsClientVersion is required by the subscription catalog endpoint.
 const codexModelsClientVersion = "0.0.0"
 
-var _ Client = (*OpenAI)(nil)
-var _ Client = (*Codex)(nil)
+var (
+	_ Client = (*OpenAI)(nil)
+	_ Client = (*Codex)(nil)
+)
 
 func NewCodex(baseURL string, source *codexauth.Source) *Codex {
 	return &Codex{
@@ -217,7 +219,7 @@ func (c *Codex) post(ctx context.Context, body []byte, stream bool) (*http.Respo
 		return nil, err
 	}
 	setCodexHeaders(hr, creds)
-	hr.Header.Set("OpenAI-Beta", "responses=experimental")
+	hr.Header.Set("Openai-Beta", "responses=experimental")
 	hr.Header.Set("Content-Type", "application/json")
 	if stream {
 		hr.Header.Set("Accept", "text/event-stream")
@@ -227,7 +229,7 @@ func (c *Codex) post(ctx context.Context, body []byte, stream bool) (*http.Respo
 
 func setCodexHeaders(hr *http.Request, creds codexauth.Credentials) {
 	hr.Header.Set("Authorization", "Bearer "+creds.AccessToken)
-	hr.Header.Set("ChatGPT-Account-ID", creds.AccountID)
+	hr.Header.Set("Chatgpt-Account-Id", creds.AccountID)
 	hr.Header.Set("Originator", "whip")
 }
 

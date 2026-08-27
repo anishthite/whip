@@ -30,7 +30,7 @@ func authCodexAt(ctx context.Context, source *codexauth.Source, out io.Writer, b
 		fmt.Fprint(out, deviceLoginPrompt(code))
 	})
 	if errors.Is(err, context.Canceled) {
-		return errors.New("Codex login cancelled")
+		return errors.New("codex login cancelled")
 	}
 	if err != nil {
 		return err

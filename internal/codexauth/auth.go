@@ -145,6 +145,7 @@ func (s *Source) codexCandidate() (*candidate, error) {
 		return nil, err
 	}
 	path := filepath.Join(home, ".codex", "auth.json")
+	//nolint:gosec // path is constructed from the user's Codex home directory.
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return &candidate{path: path, root: map[string]json.RawMessage{}}, nil
@@ -495,11 +496,11 @@ func writeAtomic(path string, data []byte) error {
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
