@@ -2619,7 +2619,17 @@ func (m *model) applyCompactModel() {
 	if cm == "" {
 		cm = config.DefaultCompactModel
 	}
-	prov, _, apiID, err := m.cfg.Resolve(cm, m.compactProv)
+
+	// A compaction model without an explicit provider follows its model route,
+	// not the session's DefaultProvider. In particular, the built-in DeepSeek
+	// summary model is available through inference.net, not a Codex subscription.
+	compactProv := m.compactProv
+	if compactProv == "" {
+		if mdl, ok := m.cfg.Models[cm]; ok && len(mdl.Providers) > 0 {
+			compactProv = mdl.Providers[0]
+		}
+	}
+	prov, _, apiID, err := m.cfg.Resolve(cm, compactProv)
 	if err != nil {
 		if m.compactModel != "" { // a picked model failing is worth a note; a missing default isn't
 			m.append(errStyle.Render("compaction model: " + err.Error() + " — using current model"))

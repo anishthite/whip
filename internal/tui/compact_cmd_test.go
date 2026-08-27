@@ -94,6 +94,20 @@ func TestCompactModelEmptyResolvesDefault(t *testing.T) {
 	}
 }
 
+// The inference-only built-in summary model must not inherit the session's
+// default provider, which may not serve DeepSeek model IDs.
+func TestCompactModelDefaultDoesNotUseSessionDefaultProvider(t *testing.T) {
+	m := compactCmdModel()
+	m.cfg.DefaultProvider = "other"
+	m.cfg.Providers["other"] = config.Provider{BaseURL: "https://other"}
+
+	m.applyCompactModel()
+
+	if m.agent.CompactModel != config.DefaultCompactModel || m.agent.CompactClient == nil {
+		t.Fatalf("default summary should use inference route, got model %q client %T", m.agent.CompactModel, m.agent.CompactClient)
+	}
+}
+
 // When the default model isn't in the user's config, the override clears and
 // compaction falls back to the conversation's own model — no error note.
 func TestCompactModelDefaultFallsBack(t *testing.T) {

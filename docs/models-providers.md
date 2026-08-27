@@ -117,8 +117,11 @@ accumulate per session. Hidden entirely when pricing isn't advertised.
 Compaction summarizes with a separate, cheaper model:
 `compactModel`/`compactProvider` in config, defaulting to
 `deepseek-v4-flash-0731` (`config.DefaultCompactModel`), falling back to the
-conversation's own model. `/compact <model> [provider]` picks the summarizer
-by hand. Mechanics: [agent-loop.md](agent-loop.md#compaction).
+conversation's own model. When `compactProvider` is omitted, Whip uses the
+compaction model's configured route rather than the session's `defaultProvider`;
+the built-in DeepSeek summarizer therefore uses `inference-net`, even in a Codex
+session. `/compact <model> [provider]` picks the summarizer by hand. Mechanics:
+[agent-loop.md](agent-loop.md#compaction).
 
 ## Read next
 
