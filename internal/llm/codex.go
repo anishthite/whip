@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -99,9 +98,6 @@ func (c *Codex) Stream(ctx context.Context, req Request, onText, onThink func(st
 	body, err := json.Marshal(codexRequest(req, true))
 	if err != nil {
 		return Message{}, Usage{}, err
-	}
-	if path := os.Getenv("WHIP_DEBUG_CODEX_BODY"); path != "" {
-		_ = os.WriteFile(path, body, 0o600)
 	}
 	resp, err := c.post(ctx, body, true)
 	if err != nil {
@@ -493,7 +489,7 @@ type responseItem struct {
 	CallID    string            `json:"call_id"`
 	Name      string            `json:"name"`
 	Arguments string            `json:"arguments"`
-	Content   []responseContent `json:"content"`
+	Content   []responseContent `json:"content,omitempty"`
 	Raw       json.RawMessage   `json:"-"`
 }
 

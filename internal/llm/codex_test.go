@@ -216,6 +216,9 @@ func TestCodexRequestUsesOutputMessageForAssistantHistory(t *testing.T) {
 	if callItem["type"] != "function_call" || callItem["id"] != "fc-1" || callItem["call_id"] != "call-1" {
 		t.Fatalf("assistant tool call = %#v", callItem)
 	}
+	if _, ok := callItem["content"]; ok {
+		t.Fatalf("function call must not carry content: %#v", callItem)
+	}
 }
 
 func TestCodexMessageID(t *testing.T) {
