@@ -204,4 +204,6 @@ How it works, from the top down:
 - [roadmap.md](roadmap.md) — what's shipped vs. what's next,
   cross-referenced to the harnesses that inspired each item.
 - [learnings/](learnings/) — exploration reports from other
-  harnesses (pi, opencode, exo) that informed the design.
+  harnesses (pi, opencode, exo, and
+  [DeepSeek Harness / RLMs](learnings/other-harnesses/deepseek-exo-rlm.md)) that
+  informed the design.
