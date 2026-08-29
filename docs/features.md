@@ -378,7 +378,8 @@ relay: full device login + key mint, store round-trip, key validation),
   disables capture at startup.
 - Queueing (enter while busy), steering (empty enter), history recall (↑/↓),
   `@file` mentions, `$skill` invocation, `/goal` loop, `/resume` session
-  picker, `/effort` reasoning levels — see the roadmap for the full list.
+  picker, `whip -c` continue and `whip -r` browse for this directory,
+  `/effort` reasoning levels — see the roadmap for the full list.
 - **Settings commands run mid-turn.** `/theme`, `/mouse`, `/effort`, `/subagents` (alias `/tasks`),
   `/help`, `/cd`, `/pwd`, and the non-submitting `/goal` forms (bare, `clear`,
   `rounds`) execute immediately while busy instead of queueing — queued text
