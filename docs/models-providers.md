@@ -32,6 +32,18 @@ flowchart LR
   (`-p` / `/model <name> <provider>`) to disambiguate.
 - Newly announced models appear in the `/model` picker dimmed, marked
   `(new)`, after `/model refresh` or the next TTL cycle.
+- **Retry-on-miss at startup.** If launch-time resolution reports an unknown
+  model — the default model has no config entry and the cached catalog is
+  missing or stale (deleted `~/.whip/models.json`, or a model announced after
+  the last fetch) — whip synchronously force-refreshes the configured
+  providers' catalogs and retries resolution once before failing. The happy
+  path never pays for this: a successful first resolve performs no fetch, so
+  normal and offline starts are unaffected. Applies to every entrypoint
+  (`whip`, `whip run`, `whip acp`); a genuinely unknown model still errors,
+  after exactly one refresh attempt.
+- `/model` persists the switch as the saved default. `/model-for-session`
+  switches the active model identically but leaves the saved default
+  untouched, so the next launch still opens on the configured model.
 
 ## Key resolution
 
@@ -89,8 +101,8 @@ re-keys in place, including the live session's routing when it's already on
 the openrouter provider.
 
 Per-model overrides still compose: add an entry under `"models"` in
-config.json (with `"providers": ["openrouter"]`) to pin context, maxOut, or
-vision for a specific id.
+config.json (with `"providers": ["openrouter"]`) to pin context, maxOut,
+vision, or sampling params for a specific id.
 
 ## Token bookkeeping
 
@@ -100,10 +112,13 @@ Three numbers with distinct meanings:
 |---|---|---|
 | `context` | model's **input** window | header % full, proactive compaction threshold |
 | `maxOut` | optional **output** cap | request `max_completion_tokens` |
+| `samplingParams` | optional `{temperature, top_p}` knobs | sent on outbound requests for this model; omitted when unset |
 | provider `context_length` | advertised limit | overrides `context` when present |
 
 The old `maxTokens` field still parses (it always meant the context window)
-but is superseded by `context`.
+but is superseded by `context`. A model whose config entry sets
+`"samplingParams": {"temperature": 0.2}` sends those params on every request
+to that model; unset params are omitted so the provider applies its defaults.
 
 ## Cost tracking
 

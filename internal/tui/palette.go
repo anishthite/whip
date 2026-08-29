@@ -189,9 +189,7 @@ func (m *model) paletteItems() []paletteItem {
 			dynHint: func(m *model) string { return "/fork" },
 			run: func(m *model) (tea.Model, tea.Cmd) {
 				m.palette = nil
-				if !m.busy {
-					m.forkCommand("")
-				}
+				m.forkCommand("") // works mid-turn: copies now, switches at turn end
 				return m, nil
 			},
 		},
@@ -615,7 +613,7 @@ func (m *model) panelKey(msg tea.KeyMsg, pp *ppanel) (tea.Model, tea.Cmd) {
 			m.previewModel(pp.items[pp.idx])
 		case tea.KeyEnter:
 			it := pp.items[pp.idx]
-			m.switchModel(it.model, it.provider)
+			m.switchModel(it.model, it.provider, true)
 			pop()
 		}
 
@@ -731,6 +729,7 @@ func (m *model) previewModel(it modelItem) {
 	ag.CompactClient, ag.CompactModel = m.agent.CompactClient, m.agent.CompactModel
 	ag.CompactThreshold = m.agent.CompactThreshold
 	m.agent, m.modelName, m.provName = ag, mn, pn
+	m.applyTaskModel()
 	if !slices.Contains(m.effortsFor(), ag.Effort) {
 		m.setEffort("") // the previewed model doesn't support the current level
 	}

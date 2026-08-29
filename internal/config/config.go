@@ -4,6 +4,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -119,6 +120,18 @@ type Model struct {
 	// gets a pointer note instead, so a text-only model isn't sent a request it
 	// would reject. A provider-advertised input_modalities entry overrides this.
 	Vision bool `json:"vision,omitempty"`
+	// SamplingParams are optional per-model sampling knobs (temperature, top_p)
+	// applied to outbound chat-completion requests for this model. Fields are
+	// omitted from requests when unset, so provider defaults are preserved.
+	SamplingParams *SamplingParams `json:"samplingParams,omitempty"`
+}
+
+// SamplingParams holds optional per-model sampling knobs sent on outbound
+// chat-completion requests. Pointer fields: a 0.0 temperature/top_p is a
+// legitimate value, and nil means "don't send" (provider default).
+type SamplingParams struct {
+	Temperature *float64 `json:"temperature,omitempty"`
+	TopP        *float64 `json:"top_p,omitempty"`
 }
 
 // ContextWindow returns the model's context (input) size, honoring the legacy
@@ -136,6 +149,13 @@ func (m Model) ContextWindow() int {
 // conversation's model when it's not in the user's config.
 const DefaultCompactModel = "deepseek-v4-flash-0731"
 
+// DefaultTaskModel is the built-in subagent-model default: subagents are
+// high-volume, self-contained work, so they run on the same cheap fast route
+// compaction uses unless the user pins taskModel or the main model overrides
+// per task. Falls back to the conversation's model when it's not resolvable
+// (an openrouter-only config resolves it via a catalog suffix match first).
+const DefaultTaskModel = DefaultCompactModel
+
 // DefaultCompactPct is the built-in compaction threshold: compact once the
 // estimated context use crosses this percent of the model's context window.
 // 50% keeps compaction deterministic instead of letting the context bloat.
@@ -143,20 +163,26 @@ const DefaultCompactPct = 50
 
 // Config is the root of ~/.whip/config.json (JSONC: comments allowed).
 type Config struct {
-	DefaultModel    string              `json:"defaultModel"`
-	DefaultProvider string              `json:"defaultProvider,omitempty"` // override the model's first provider
-	DefaultEffort   string              `json:"defaultEffort,omitempty"`   // reasoning effort for new sessions: "", "low", "medium", "high"
-	CompactModel    string              `json:"compactModel,omitempty"`    // model for compaction summaries; "" = the built-in default
-	CompactProvider string              `json:"compactProvider,omitempty"` // provider for the compaction model; "" = the model's default routing
-	CompactPct      int                 `json:"compactPct,omitempty"`      // compact at this % of the context window; 0 = DefaultCompactPct
-	Theme           string              `json:"theme,omitempty"`           // "light", "dark", "" (auto), or a ~/.whip/themes name
-	Mouse           *bool               `json:"mouse,omitempty"`           // false disables capture so native terminal selection works
-	Thinking        *bool               `json:"thinking,omitempty"`        // nil defaults to on; false hides reasoning tokens (ctrl+o)
-	CollapsePaste   *bool               `json:"collapsePaste,omitempty"`   // nil/false: pastes land verbatim; true collapses ≥3-line pastes into a [Pasted ~N lines] placeholder
-	GoalMaxRounds   int                 `json:"goalMaxRounds,omitempty"`   // global goal-loop round cap; 0 = DefaultGoalMaxRounds; projects.json may override per folder
-	MaxRetries      int                 `json:"maxRetries,omitempty"`      // attempts per provider request on transient failures (429/5xx/network); 0 = llm.DefaultMaxAttempts, 1 = no retries
-	Providers       map[string]Provider `json:"providers"`
-	Models          map[string]Model    `json:"models"`
+	DefaultModel    string `json:"defaultModel"`
+	DefaultProvider string `json:"defaultProvider,omitempty"` // override the model's first provider
+	DefaultEffort   string `json:"defaultEffort,omitempty"`   // reasoning effort for new sessions: "" defaults to "low"; "off", "low", "medium", "high"
+	CompactModel    string `json:"compactModel,omitempty"`    // model for compaction summaries; "" = the built-in default
+	CompactProvider string `json:"compactProvider,omitempty"` // provider for the compaction model; "" = the model's default routing
+	CompactPct      int    `json:"compactPct,omitempty"`      // compact at this % of the context window; 0 = DefaultCompactPct
+	TaskModel       string `json:"taskModel,omitempty"`       // model subagents (the task tool) run on; "" = the built-in default
+	TaskProvider    string `json:"taskProvider,omitempty"`    // provider for the subagent model; "" = the model's default routing
+	Theme           string `json:"theme,omitempty"`           // "light", "dark", "" (auto), or a ~/.whip/themes name
+	Mouse           *bool  `json:"mouse,omitempty"`           // false disables capture so native terminal selection works
+	Thinking        *bool  `json:"thinking,omitempty"`        // nil defaults to on; false hides reasoning tokens (ctrl+o)
+	CollapsePaste   *bool  `json:"collapsePaste,omitempty"`   // nil/false: pastes land verbatim; true collapses ≥3-line pastes into a [Pasted ~N lines] placeholder
+	GoalMaxRounds   int    `json:"goalMaxRounds,omitempty"`   // global goal-loop round cap; 0 = DefaultGoalMaxRounds; projects.json may override per folder
+	// WorktreeSubagents defaults background subagents to run in their own git
+	// worktree so their file edits stay isolated from the parent's tree and
+	// from each other. The subagent tool's per-call `worktree` arg overrides this.
+	WorktreeSubagents *bool               `json:"worktreeSubagents,omitempty"`
+	MaxRetries        int                 `json:"maxRetries,omitempty"` // attempts per provider request on transient failures (429/5xx/network); 0 = llm.DefaultMaxAttempts, 1 = no retries
+	Providers         map[string]Provider `json:"providers"`
+	Models            map[string]Model    `json:"models"`
 	// MCPServers is whip's own MCP server block (whip-native shape; see
 	// internal/mcp.ServerConfig for the normalized semantics). On load it is
 	// merged over imported claude/codex configs: whip always wins per name.
@@ -463,6 +489,19 @@ func (c *Config) Resolve(model, provider string) (Provider, Model, string, error
 	return p, m, id, nil
 }
 
+// UnknownModelError flags a Resolve miss the caller may recover from by
+// refreshing the provider catalogs and retrying: the model is absent from
+// both cfg.Models and every provider's cached /models list, which a stale
+// (or deleted) ~/.whip/models.json causes even for live models.
+type UnknownModelError struct {
+	Model string
+	known string // config model names, for the message
+}
+
+func (e *UnknownModelError) Error() string {
+	return fmt.Sprintf("unknown model %q (models: %s)", e.Model, e.known)
+}
+
 // resolveFromCatalog synthesizes a Model for an id advertised in a provider's
 // cached /models catalog but absent from cfg.Models. Capabilities (context,
 // max output, vision) come from the catalog entry; the provider routing is the
@@ -487,7 +526,7 @@ func (c *Config) resolveFromCatalog(model, provider string) (Model, string, erro
 		}
 	}
 	if len(hits) == 0 {
-		return Model{}, "", fmt.Errorf("unknown model %q (models: %s)", model, keys(c.Models))
+		return Model{}, "", &UnknownModelError{Model: model, known: keys(c.Models)}
 	}
 	if len(hits) > 1 {
 		names := make([]string, len(hits))
@@ -508,6 +547,20 @@ func (c *Config) resolveFromCatalog(model, provider string) (Model, string, erro
 		m.Vision = true
 	}
 	return m, h.prov, nil
+}
+
+// Snapshot returns a copy of the config safe to read from another goroutine
+// while the original keeps being mutated on the UI goroutine (the subagent
+// model resolver runs on tool workers). Maps are copied one level deep —
+// their struct values are plain data; nested slices are never mutated in
+// place, only replaced wholesale with the map entry.
+func (c *Config) Snapshot() *Config {
+	snap := *c
+	snap.Providers = make(map[string]Provider, len(c.Providers))
+	maps.Copy(snap.Providers, c.Providers)
+	snap.Models = make(map[string]Model, len(c.Models))
+	maps.Copy(snap.Models, c.Models)
+	return &snap
 }
 
 func keys[V any](m map[string]V) string {

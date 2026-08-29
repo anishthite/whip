@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/context-labs/whip/internal/llm"
@@ -20,6 +21,10 @@ type Events struct {
 	OnThink     func(delta string)            // reasoning/thinking tokens as they stream
 	OnToolStart func(id, name, args string)   // a tool call is about to run
 	OnToolEnd   func(id, name, result string) // a tool call finished
+	// OnToolCall fires as a tool call streams in (id/name/args snapshots; args
+	// may be partial mid-stream), so the UI can show a pending row before
+	// execution starts. Distinct from OnToolStart, which fires at run time.
+	OnToolCall func(id, name, args string)
 	// OnToolOutput streams partial output for a running tool call (bash only —
 	// throttled snapshots, ~100ms apart). Fires from tool worker goroutines.
 	OnToolOutput func(id, outputSoFar string)
@@ -28,6 +33,21 @@ type Events struct {
 	OnCompacted  func(summary string, cutoff int) // a compaction ran; record it (raw log survives)
 	OnUsage      func(u llm.Usage)                // a request reported its token usage
 	OnRetry      func(ev llm.RetryEvent)          // a transient request failure is being retried
+	// OnDecay fires when the per-turn decay pass rewrote n history messages
+	// (superseded reads / aged tool outputs). The caller must re-persist the
+	// affected prefix — the store's Save(from=1) INSERT OR REPLACEs it.
+	OnDecay func(n int)
+}
+
+// OnTodos is the agent-level hook fired by setTodos (the todowrite tool)
+// whenever the plan is rewritten. Set by the ACP bridge for the duration of
+// a turn; nil elsewhere. Kept off Events because todowrite is a tool call
+// three layers below the turn loop — threading Events into it would leak the
+// streaming abstraction into tools.
+func (a *Agent) SetOnTodos(fn func(items []Todo)) {
+	a.todosMu.Lock()
+	a.onTodos = fn
+	a.todosMu.Unlock()
 }
 
 // Agent holds one conversation.
@@ -38,8 +58,12 @@ type Agent struct {
 	Provider  string // config provider name
 	MaxTokens int
 	Effort    string // reasoning effort: "" = parameter omitted from requests
-	Tools     []tools.Tool
-	Messages  []llm.Message
+	// Temperature/TopP are optional per-model sampling knobs for outbound
+	// requests. nil omits the field, preserving provider defaults.
+	Temperature *float64
+	TopP        *float64
+	Tools       []tools.Tool
+	Messages    []llm.Message
 
 	// ContextLimit is the model's context window in tokens, as advertised by
 	// the provider's GET /models (0 when unadvertised — proactive compaction
@@ -53,9 +77,23 @@ type Agent struct {
 	// proactively; 0 uses defaultCompactThreshold.
 	CompactThreshold float64
 
+	// TaskDefault is the default subagent route (config taskModel); the zero
+	// value runs subagents on the conversation's own client and model.
+	TaskDefault SubModel
+	// ResolveModel resolves a per-task model override named in a task call.
+	// Installed by the front-end (TUI or `whip run`) so the agent stays
+	// config-free; nil rejects overrides. It runs on tool worker goroutines,
+	// so implementations must not share mutable state with the UI.
+	ResolveModel func(model, provider string) (SubModel, error)
+
 	// MaxTurns caps the tool-call loop (rounds of model→tools→model) so a
 	// scripted run can't run away. 0 = uncapped (the TUI default).
 	MaxTurns int
+
+	// WorktreeSubagents is the session default for running background
+	// subagents in their own git worktree (isolated file edits). The subagent
+	// tool's per-call `worktree` argument overrides it. Off by default.
+	WorktreeSubagents bool
 
 	mu        sync.Mutex
 	pending   []pendingSteer // steered user messages awaiting injection
@@ -74,7 +112,12 @@ type Agent struct {
 	// goroutine; the TUI reads it between turns via TodosJSON.
 	Todos []Todo
 
-	sessionID string // scopes the per-session memory file (SetSessionID)
+	// onTodos fires after each setTodos (installed per turn by the ACP
+	// bridge); todosMu guards it against a raced installer.
+	todosMu sync.Mutex
+	onTodos func(items []Todo)
+
+	sessionID atomic.Pointer[string] // scopes the per-session memory file + keys the prompt cache (SetSessionID)
 
 	// toolsMu guards mcpTools: the MCP manager's OnChange can fire (server
 	// settled) while a Turn is streaming, and Turn reads the tool set per
@@ -199,7 +242,7 @@ func New(client *llm.Client, model string, maxTokens int, systemPrompt string) *
 	if !a.ComputerDisabled {
 		a.Tools = append(a.Tools, tools.ComputerExec())
 	}
-	a.Tools = append(a.Tools, taskTool(a))
+	a.Tools = append(a.Tools, taskTool(a), taskSteerTool(a))
 	a.Tools = append(a.Tools, todoTool(a))
 	a.Tools = append(a.Tools, memoryTools(a)...)
 	a.files = newFileLocks()
@@ -270,6 +313,13 @@ func (a *Agent) TurnAuthored(ctx context.Context, input string, ev Events) (stri
 	return a.turn(ctx, input, nil, true, ev)
 }
 
+// TurnParts is TurnAuthored with full control over content parts — the ACP
+// bridge builds mixed text/image submissions from client content blocks this
+// way. With nil parts it behaves exactly like TurnAuthored.
+func (a *Agent) TurnParts(ctx context.Context, input string, parts []llm.ContentPart, ev Events) (string, error) {
+	return a.turn(ctx, input, parts, true, ev)
+}
+
 // TurnWithImages is TurnAuthored for a submission that attaches images. Each
 // part is a vision ContentPart (see llm.ImagePart); the model receives the
 // text and the images together as a multimodal content array.
@@ -278,6 +328,13 @@ func (a *Agent) TurnWithImages(ctx context.Context, input string, parts []llm.Co
 }
 
 func (a *Agent) turn(ctx context.Context, input string, parts []llm.ContentPart, authored bool, ev Events) (string, error) {
+	// Decay old tool output before the new user message lands: the pass only
+	// prunes history outside the hot window, and running it pre-append keeps
+	// the new message (and this turn's tool results) inside the window where
+	// they stay byte-stable for the prefix cache.
+	if n := a.decay(); n > 0 && ev.OnDecay != nil {
+		ev.OnDecay(n)
+	}
 	msg := llm.Message{Role: "user", Content: input, Parts: parts, Authored: authored}
 	if authored {
 		now := time.Now()
@@ -312,7 +369,9 @@ func (a *Agent) turn(ctx context.Context, input string, parts []llm.ContentPart,
 			Messages:        msgs,
 			Tools:           tools.Defs(a.AllTools()),
 			ReasoningEffort: a.Effort,
-		}, ev.OnText, ev.OnThink)
+			Temperature:     a.Temperature,
+			TopP:            a.TopP,
+		}, ev.OnText, ev.OnThink, ev.OnToolCall)
 		a.Client.OnRetry = nil
 		a.AddUsage(usage)
 		if ev.OnUsage != nil {

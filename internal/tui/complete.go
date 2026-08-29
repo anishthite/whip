@@ -20,8 +20,9 @@ var commands = completionTable()
 // completionTable derives the tab-completion table from the registry, so a
 // command can never be dispatchable but uncompletable (or vice versa).
 func completionTable() []cand {
-	var out []cand
-	for _, e := range slashRegistry() {
+	reg := slashRegistry()
+	out := make([]cand, 0, len(reg))
+	for _, e := range reg {
 		out = append(out, cand{e.Name, e.Hint})
 	}
 	return out
@@ -31,7 +32,7 @@ func completionTable() []cand {
 // sensibly with no arguments); others insert themselves for arguments.
 var execNow = map[string]bool{
 	"/clear": true, "/compact": true, "/computer-use": true, "/computer": true, "/context-doctor": true, "/effort": true, "/goal": true, "/goal-from-context": true, "/help": true,
-	"/mcp": true, "/model": true, "/mouse": true, "/pwd": true, "/quit": true, "/report": true, "/resume": true, "/tasks": true,
+	"/mcp": true, "/model": true, "/mouse": true, "/pwd": true, "/quit": true, "/report": true, "/resume": true, "/subagents": true, "/tasks": true,
 }
 
 // completions splits val into an untouched head and candidates for its last
@@ -47,9 +48,9 @@ func completions(val string, models, providers, skillCands, efforts []cand) (hea
 	switch {
 	case strings.HasPrefix(val, "/") && len(fields) == 0:
 		cands = filterPrefix(commands, token)
-	case len(fields) == 1 && fields[0] == "/model":
+	case len(fields) == 1 && (fields[0] == "/model" || fields[0] == "/model-for-session"):
 		cands = filterFuzzy(append([]cand{{"refresh", "refetch provider model catalogs"}}, models...), token)
-	case len(fields) == 2 && fields[0] == "/model" && fields[1] != "refresh":
+	case len(fields) == 2 && (fields[0] == "/model" || fields[0] == "/model-for-session") && fields[1] != "refresh":
 		cands = filterFuzzy(providers, token)
 	case len(fields) == 1 && fields[0] == "/effort":
 		cands = filterPrefix(efforts, token)

@@ -21,6 +21,7 @@ import (
 	"github.com/context-labs/whip/internal/config"
 	"github.com/context-labs/whip/internal/llm"
 	"github.com/context-labs/whip/internal/session"
+	"github.com/context-labs/whip/internal/tui"
 )
 
 func runCLI(args []string) error {
@@ -71,7 +72,7 @@ func runCLI(args []string) error {
 	if err != nil {
 		return err
 	}
-	prov, mdl, apiID, err := cfg.Resolve(*modelFlag, *providerFlag)
+	prov, mdl, apiID, err := tui.ResolveWithRefresh(cfg, *modelFlag, *providerFlag)
 	if err != nil {
 		return err
 	}
@@ -95,7 +96,7 @@ func runCLI(args []string) error {
 
 	// System prompt: -system-file wins over -system (a file is the deliberate
 	// choice; a stray -system alongside it is almost certainly stale).
-	sys := systemPrompt()
+	sys := systemPrompt(cwd())
 	if *systemFlag != "" {
 		sys = *systemFlag
 	}
@@ -113,10 +114,11 @@ func runCLI(args []string) error {
 	// stays disabled (no interactive approver is ever installed).
 	ag.ComputerDisabled = true
 	ag.ContextLimit = mdl.ContextWindow()
-	ag.Effort = cfg.DefaultEffort
-	if ag.Effort == "" {
-		ag.Effort = "medium"
-	}
+	// Reasoning effort: explicit cfg.DefaultEffort wins; "" resolves
+	// model-aware — "low" when the model advertises it, else the lowest
+	// supported level, else off — so a non-reasoning model never sends an
+	// effort parameter the provider would reject.
+	ag.Effort = tui.DefaultEffortFor(config.LoadCatalogs(), provName, ag.Model, cfg.DefaultEffort)
 	ag.MaxTurns = *maxTurnsFlag
 
 	// Session: resume an existing one, or create a fresh one — unless
@@ -179,6 +181,18 @@ func runCLI(args []string) error {
 	} else {
 		ev.OnText = func(d string) { fmt.Fprint(os.Stdout, d) }
 		ev.OnToolStart = func(_, name, args string) { note("⚒ %s", name) }
+	}
+
+	// Subagent routing: same default chain as the TUI (taskModel → built-in
+	// default → catalog suffix → the run's own model). Headless runs never
+	// mutate cfg, so no snapshot is needed for the resolver.
+	ag.ResolveModel = func(model, provider string) (agent.SubModel, error) {
+		return tui.SubModelFor(cfg, model, provider)
+	}
+	if o, terr := tui.TaskDefaultFor(cfg); terr == nil {
+		ag.TaskDefault = o
+	} else {
+		note("task model: %v — subagents use the run's model", terr)
 	}
 
 	final, err := ag.Turn(ctx, prompt, ev)

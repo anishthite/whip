@@ -1,7 +1,7 @@
 # Features
 
 whip is a minimal coding-agent harness: an interactive bubbletea TUI driving an
-LLM tool-use loop (bash / read / write / edit / task) with provider-routable
+LLM tool-use loop (bash / read / write / edit / subagent) with provider-routable
 models. This document is the map of what's shipped and where it lives. Each
 section links the behavior to the code and its tests.
 
@@ -97,6 +97,32 @@ Token bookkeeping: `llm.Usage` (prompt/completion/cached) is read off the
 terminal stream chunk (`stream_options: include_usage`) and folded into session
 totals via `AddUsage`. Compaction and subagent calls count too.
 
+### Provider prompt-prefix caching
+
+To cut time-to-first-token on the many sequential turns of an agent loop,
+whip stamps `prompt_cache_key` on every request (OpenAI `prompt_cache_key`;
+openrouter/xai/azure/mistral honor the same field; providers that don't
+recognize it ignore the unknown top-level field). The key is the **session
+id**: `Agent.SetSessionID` sets `Client.CacheKey`, so a stable session lets
+the provider reuse the cached conversation prefix across turns. Subagents get
+a scoped key (`<sessionID>/<taskID>` in `StartBackground`) so their shorter,
+churning contexts never disturb the parent's cached prefix and two concurrent
+subagents don't collide on the session key. An explicit
+`Request.PromptCacheKey` overrides the client's (that's how the subagent
+scoping is applied); empty omits the field entirely so providers that would
+reject it never see it. The prefix-stability preconditions are already
+maintained elsewhere: the system prompt's per-turn memory block sits at the
+END of the system message (`prepareTurn`), MCP tools are name-sorted
+(`mcp.Manager.Tools`), and the context-decay pass keeps the recent hot window
+byte-stable. Anthropic-style `cache_control: ephemeral` breakpoints are out of
+scope — whip speaks OpenAI chat-completions uniformly and has no
+Anthropic-native consumer for them.
+
+Tests: `internal/llm/cache_test.go` — `TestPromptCacheKeyStampedFromClient`,
+`TestPromptCacheKeyRequestOverridesClient`, `TestConsecutiveRequestsSharePrefix`
+(the prefix-cache contract: turn N's messages are a byte-identical prefix of
+turn N+1's, same key on both).
+
 Commands: `/compact` (compact now), `/compact <model> [provider]` (pick the
 summarizer), `/compact off` (restore the built-in default). The palette's
 "Compaction model" panel lists every configured model behind a
@@ -114,7 +140,7 @@ Tests: `agent_test.go` — `TestTurnAutoCompactsOnContextLimit`,
 
 ### Background subagents
 
-`internal/agent/background.go` — `task` with `background: true` launches a
+`internal/agent/background.go` — the `subagent` tool with `background: true` launches a
 subagent that runs **concurrently with the parent** instead of blocking the
 turn. This is the channel-native port of opencode's `background-job.ts`
 registry.
@@ -122,7 +148,7 @@ registry.
 Each task is a `BackgroundTask` with a `Done chan struct{}`. When the subagent
 settles, the registry `settle()`s and **closes `Done` once** — closing a
 channel broadcasts to every waiter at once, so the tool caller, the TUI, and
-`/tasks` all wake together with no per-waiter state (opencode needs a per-job
+`/subagents` (alias `/tasks`) all wake together with no per-waiter state (opencode needs a per-job
 `Deferred` for the same thing). On settle the report fans back into the parent
 as a **steered message**, so the model sees it on the next loop boundary.
 
@@ -130,30 +156,93 @@ as a **steered message**, so the model sees it on the next loop boundary.
 - `Tasks().OnChange` — the TUI installs a callback that sends a message to
   redraw live. `Tasks().OnRecord` — a second hook the TUI uses to upsert the
   task into the session store on start and settle.
-- `/tasks` lists running/done subagents with report previews; a `⚙ N sub`
-  header badge shows the running count. The persistent dock strip above the
-  input is mouse-clickable: `dockTop()` maps screen rows to task rows,
-  skipping the focused hint row (`dockSkip`) so a click opens the row
-  actually clicked.
+- `/subagents` (alias `/tasks`) lists running/done subagents with report previews; a `⚙ N sub`
+  header badge shows the running count. The persistent dock strip renders
+  **below the input** (above the status line), so focus follows the cursor's
+  geometry: ↓ on an empty input (or ctrl+t) moves focus into the list, ↑ past
+  its top row — or simply typing — hands focus back, and esc is never
+  consumed by the dock (it stays the interrupt/rewind key). The strip is
+  mouse-clickable: `dockTop()` maps screen rows to task rows, skipping the
+  focused hint row (`dockSkip`) so a click opens the row actually clicked.
 - **Persisted across resume.** The session store's `tasks` table records
   every start/settle; `resume()` seeds the registry via `RestoreTask`
   (settled, `Done` pre-closed, marked `Restored`). A row still `running` on
   disk means the subagent died with the last process exit, so it comes back
   as `error` — "interrupted — whip exited". Restored tasks are history:
-  `/tasks` lists them with a `(restored)` marker; the dock never shows them.
+  `/subagents` (alias `/tasks`) lists them with a `(restored)` marker; the dock never shows them.
   The dock itself shows running tasks plus ones settled within a one-minute
   grace window (`dockSettledGrace`) — long enough to notice the ✓, then the
   strip cleans itself.
 
 Background tasks use a context **not** tied to the current turn — they outlive
-it by design. Cancelling a task cancels its subagent's turn.
+it by design. Cancelling a task cancels its subagent's turn. `settle()`
+notifies/persists **before** closing `Done`, so a waiter woken by the close
+always sees the recorded final state.
+
+**Subagent model routing** (`internal/agent/subagent.go` `SubModel`,
+`internal/tui/taskmodel.go`): subagents default to the cheap fast
+`deepseek-v4-flash-0731` route (`config.DefaultTaskModel`, same default as
+compaction); config `taskModel`/`taskProvider` pins a different one; the main
+model overrides per call via the `subagent` tool's optional `model`/`provider`
+params. Resolution chain: taskModel → built-in default → catalog id ending in
+`/<default>` (openrouter-style vendor prefixes) → silently fall back to the
+session model. The agent stays config-free: the TUI/`whip run` inject a
+`ResolveModel` closure over a `cfg.Snapshot()` (the resolver runs on tool
+worker goroutines while `/auth` mutates live config on the UI goroutine).
+
+**User-spawned subagents**: `/subagent [-m model[@provider]] <prompt>` starts a
+background task by hand — it runs mid-turn too (listed with the
+works-while-busy commands), so the LLM isn't the only driver.
+
+**Foreground fan-out and naming.** A `subagent` call without `background`
+blocks the turn on the report; emitting several in one assistant message runs
+them concurrently and returns every report together (`runTools` already
+parallelizes a tool batch). The tool description tells the model this is how to
+explore in parallel, reserving `background:true` for fire-and-forget. Two
+guardrails keep delegation legible and cheap:
+
+- A foreground report is capped at `subagentReportCap` bytes before it lands in
+  the parent's context (`subagent.go` `capReport`), so one long investigation
+  can't swamp the parent window. The subagent's own context is uncapped — only
+  what the parent ingests is bounded.
+- Transcript rows surface the task's `description` (queued + running rows via
+  `queuedSubject`/`toolSubject`, not the raw JSON args), number a parallel
+  batch `1/N` (`batchSuffix`), and background task ids are description slugs —
+  `survey-context-in-pi-3`, not `sub-1` (`taskSlug`) — so `/subagents`, the ⚙
+  badge, and steer messages name the work.
+
+Tests: `TestForegroundReportCapped`, `TestForegroundReportUnderCapPassesThrough`,
+`TestTaskSlug`, `TestStartBackgroundSlugID` (agent); `TestSubagentBatchNumbered`,
+`TestSubagentSingletonNotNumbered`, `TestBatchSuffixPerToolName` (tui).
+
+**Chat with a subagent** — a task IS a session. The retained subagent lives on
+its `BackgroundTask`; the detail view (enter from the dock) has a chat input:
+
+- while the task **runs**, enter **steers** it (`Agent.SteerTask` → the
+  child's own `pendingSteer` queue — the parent→child pipe reuses the existing
+  steer primitive, no new synchronization); the model gets the same power via
+  the `subagent_steer` tool (`{id, message}`).
+- once it **settles**, enter runs **follow-up turns** on its preserved context
+  (`Agent.FollowupTask`) — status/report/`Done` stay as they settled, usage
+  rolls into the parent session. ctrl+x cancels the running task or the
+  in-flight follow-up. Follow-up chats are live-only by design (not
+  persisted); restored tasks are read-only — their process died.
+  `ClearSettled(keep…)` protects a task whose pane is open from the new-turn
+  dock sweep.
 
 Tests: `TestBackgroundTaskDeliversReport`, `TestBackgroundTaskBroadcastsToManyWaiters`
 (8 waiters all woken by one channel close), `TestBackgroundTaskCancel`;
 persistence: `session.TestTaskRoundTrip`, `TestRestoreTaskSettledAndVisible`,
 `TestResumeRestoresTasks`, `TestTaskPersistsOnStartAndSettle`;
 dock click hit-testing: `TestDockClickOpensClickedRow`,
-`TestDockClickIgnoredWhilePaletteOpen`.
+`TestDockClickIgnoredWhilePaletteOpen`; routing: `submodel_test.go` —
+`TestTaskModelOverride`, `TestTaskDefaultRoutesSubagents`,
+`TestTaskModelOverrideErrors`; chat: `TestSteerTaskReachesRunningSubagent`,
+`TestFollowupTaskChatsOnRetainedContext`, `TestClearSettledKeep`;
+TUI: `taskmodel_test.go` — `TestTaskDefaultForResolvesDefault`,
+`TestTaskDefaultForFallbacks`, `TestTaskDefaultForCatalogSuffix`,
+`TestTaskCommandSpawns`, `TestTaskViewChat`, `TestTaskViewRestoredReadOnly`,
+`TestTaskViewCtrlXCancels`.
 
 ## Models & providers
 
@@ -249,12 +338,24 @@ relay: full device login + key mint, store round-trip, key validation),
   within a 2-second window**, so a stray ctrl+c can't nuke the session. The
   hint `press ctrl+c again to quit` shows while armed.
   Tests: `quit_confirm_test.go`.
-- **Collapsible tool results.** Tool results store raw output in a `blockTool`
-  transcript block and render collapsed to 5 lines with a `… +N lines` hint.
-  `ctrl+e` toggles the most recent; clicking a block expands/collapses it
-  (each block tracks its rendered line range `y0`/`y1` so the click row maps
-  through the viewport offset). Blocks re-render at the current width on
-  terminal resize. Tests: `tool_expand_test.go`, `resize_test.go`.
+- **Collapsible tool results, claude-style.** A completed call renders as a
+  `● Verb(subject)` header (`internal/tui/toolrow.go` — `Update(path)`,
+  `Bash(cmd)`, `Subagent(description)`; the collapse never loses what the call
+  was about) over its result in a `blockTool` block: first line under a `⎿`
+  marker, collapsed to 5 lines with a `… +N lines` hint, red when the result
+  is an error. **Write/edit results render their diff**: the tools emit
+  line-numbered fenced diffs (`editDiff` with a startLine; `write` diffs
+  overwrites against the old content from line 1), and the TUI shows
+  `⎿ Added N lines, removed M lines` over red/green full-width bands with
+  absolute line numbers — the diff IS the collapsed view (capped at 30 rows),
+  and trailing LSP diagnostics stay visible under it. Resumed sessions
+  re-render call headers and diffs from the stored messages. `ctrl+e` toggles
+  the most recent; clicking a block expands/collapses it (each block tracks
+  its rendered line range `y0`/`y1` so the click row maps through the
+  viewport offset). Blocks re-render at the current width on terminal resize.
+  Tests: `tool_expand_test.go`, `resize_test.go`, `toolrow_test.go`
+  (headers, extract/counts, colored diff render, preview cap, resume),
+  `tools_test.go` — `TestEditDiffLineNumbers`, `TestWriteToolDiffOnOverwrite`.
 - **Markdown.** Assistant messages render through glamour; streamed in-flight
   text stays plain and renders on flush. `markdown.go`.
 - **Clickable links (OSC 8).** URLs and existing local file paths in the
@@ -287,7 +388,7 @@ relay: full device login + key mint, store round-trip, key validation),
 - Queueing (enter while busy), steering (empty enter), history recall (↑/↓),
   `@file` mentions, `$skill` invocation, `/goal` loop, `/resume` session
   picker, `/effort` reasoning levels — see the roadmap for the full list.
-- **Settings commands run mid-turn.** `/theme`, `/mouse`, `/effort`, `/tasks`,
+- **Settings commands run mid-turn.** `/theme`, `/mouse`, `/effort`, `/subagents` (alias `/tasks`),
   `/help`, `/cd`, `/pwd`, and the non-submitting `/goal` forms (bare, `clear`,
   `rounds`) execute immediately while busy instead of queueing — queued text
   is sent to the model verbatim after the turn, which is nonsense for a
@@ -355,10 +456,17 @@ inline name prompt prefilled with `<title> (fork #N)` (`Store.ForkTitle`
 increments past existing forks and unwraps nested suffixes, opencode's
 `getForkedTitle`). **`f` in the rewind picker** forks from the selected
 message instead — one picker, two destinations. Forking while rewound pulls
-the redo stack up to the picked point into the copy. **`/rename [title]`**
-retitles the current session (`Store.SetTitle`); bare opens the same inline
-prompt prefilled with the current title. Both prompts stash and restore any
-in-progress draft. All three refuse to run mid-turn. Palette entries:
+the redo stack up to the picked point into the copy. **Mid-turn** (`busyFork`)
+the copy of the stored rows lands immediately — the confirmation prints the
+`whip --resume <id>` line so the clone can be opened in another whip process
+right away — and the switch defers to `turnDoneMsg` (`pendingForkID` →
+`switchToForked`), since the turn goroutine owns `Agent.Messages` and the
+session id until then; the original keeps the finished turn, queued messages
+are dropped (they named the old conversation), and the goal carries over via
+the copy's stamped row. **`/rename [title]`** retitles the current session
+(`Store.SetTitle`); bare opens the same inline prompt prefilled with the
+current title. Both prompts stash and restore any in-progress draft. /rename
+refuses to run mid-turn; /fork never queues. Palette entries:
 "Rewind conversation", "Fork session", "Rename session" under Session.
 
 Tests: `rewind_test.go` — double-esc opens/cancels, busy esc still
@@ -367,7 +475,8 @@ partial-rewind DB prefix, tool-call-pair safety, stale esc-arm across modal
 dismiss, draft preservation, resume-after-rewind. `fork_test.go` (session) —
 prefix/full copy, fork-title numbering, rename, DeleteFrom. `fork_test.go`
 (tui) — fork with arg, bare prompt suggestion + cancel, fork from the picker,
-fork while rewound into the redo stack, rename both paths.
+fork while rewound into the redo stack, busy fork (immediate copy + deferred
+switch + double-fork refusal + nothing-persisted case), rename both paths.
 
 ## MCP
 
@@ -723,6 +832,82 @@ environment quirk, not a rod/whip bug; verified on real Chrome.
 
 The browser-use CLI-over-MCP escape hatch remains available via config for
 anyone wanting the Python ecosystem (§4 option B).
+
+## ACP agent mode
+
+`whip acp` (`cmd/whip/acp.go`, `internal/acp/`) serves whip as an **Agent
+Client Protocol** v1 agent over stdio: an editor (Zed et al.) spawns the
+binary and drives the agent loop with newline-delimited JSON-RPC 2.0. Stdout
+is exclusively protocol frames; diagnostics go to stderr + the event log.
+Wire types, framing, and per-session cancel plumbing come from
+`github.com/coder/acp-go-sdk` (schema-generated, zero transitive deps).
+
+- **Bridge** (`internal/acp/bridge.go`) — implements the SDK's `Agent` +
+  `AgentLoader`: `initialize` negotiates protocol version 1 and advertises
+  `loadSession` (with a store), prompt capabilities (image only when the
+  resolved model has vision; embeddedContext always), MCP-over-http, and
+  `sessionCapabilities.list`/`close`. `session/new` builds a fresh
+  `agent.Agent` via a `Factory` (model/key/system-prompt rooted at the
+  client's `cwd`, per-session MCP manager merging client-sent servers over
+  whip's config — whip wins name clashes). `session/prompt` runs
+  `Agent.TurnParts` (the one-line export of the loop's parts-taking turn);
+  streamed text/thought chunks, tool cards (`tool_call`/`tool_call_update`
+  with kind, title, locations, raw input, and `diff` content for
+  write/edit), `plan` updates from todowrite (via the new
+  `Agent.SetOnTodos` hook), `usage_update` (per-request prompt tokens over
+  the advertised context window), and a `session_info_update` title once the
+  store auto-titles the session — all flow through `SessionUpdate`
+  notifications. Stop reasons: `end_turn` normally, `cancelled` on
+  `session/cancel` (never an error response, per spec), `max_tokens` when a
+  context-limit error survives the compaction retry.
+- **One turn at a time** — a prompt arriving mid-turn gets a JSON-RPC
+  "session busy" error (ACP clients serialize turns; queueing prompts nobody
+  is watching invites zombie work). The turn runs on a ctx decoupled from
+  the request ctx because the SDK auto-cancels a session's in-flight prompt
+  when a second prompt arrives; cancellation flows through `session/cancel`
+  → `Bridge.Cancel` instead, and an idle-session cancel (which the SDK parks
+  against the next request's ctx) is a no-op. `session/close` and process
+  teardown (`Bridge.CloseAll` on conn EOF/signal) cancel running turns and
+  close per-session MCP managers before `bashrun.KillAll()`.
+- **Persistence** — turns save into the same SQLite store as the TUI
+  (`storeFrom` starts at 1: the system prompt is never persisted), so an ACP
+  session is resumable with `whip --resume <id>` and appears in
+  `session/list`. `session/load` rejects prefix ids, verifies the request
+  cwd matches the recorded one, then replays the full history (user/agent
+  chunks + tool cards in terminal state, `replayUpdates` in translate.go)
+  **before** responding, per spec.
+- **Modes & permissions** (`internal/acp/permission.go`) — sessions
+  advertise modes `auto` (default; tools ungated, `whip run` posture) and
+  `ask` (gated bash/write/edit round-trip through
+  `session/request_permission` with allow-once/always/reject options).
+  `session/set_mode` flips live and echoes `current_mode_update`. The gate
+  installs on the package-global `tools.Gate` serialized bridge-wide for the
+  turn's duration (a second ask-mode turn waits rather than interleave
+  mislabeled prompts); the permission request runs on the turn ctx so cancel
+  unblocks it, and cancelled/errored prompts fail closed. "Allow always"
+  rules are remembered per session for the session's lifetime.
+
+Out of scope by design (recorded in `.ai-docs/plans/acp/README.md`):
+terminal suite, `fs/*` client calls, elicitation, auth, config options,
+session/resume+delete, ACP v2. Known gap: background subagents gated
+mid-turn share the session's gate.
+
+Tests: `internal/acp/translate_test.go` (content-block conversion, tool
+kind/title/locations, diff cards, replay ordering), `bridge_test.go` +
+`bridge_lifecycle_test.go` (in-memory client over pipes + scripted httptest
+provider: capabilities, streaming order, cancel mid-turn → cancelled not
+error, prompt-while-busy → "session busy" error + recovery, unknown session,
+idle-cancel no-op, plan updates, context-limit → max_tokens),
+`permission_test.go` (allow-once/reject/always-covers-repeats, auto mode
+never prompts, unknown mode, cancelled outcome fails closed),
+`load_test.go` (persistence incremental + system-prompt exclusion, replay
+before response with tool cards, prefix-id rejection, session/list with cwd
+filter, usage + title updates). All green under `-race`.
+
+Editor setup (Zed `settings.json`):
+```json
+{ "agent_servers": { "whip": { "command": "/path/to/whip", "args": ["acp"] } } }
+```
 
 ## Computer-use (macOS)
 
