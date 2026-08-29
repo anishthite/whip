@@ -50,8 +50,9 @@ handling, model routing, streaming, session persistence, and cancellation.
 1. [x] Correct the requested surface from the TUI to the shell executable.
 2. [x] Add the thin `whip up` dispatcher and prompt adapter.
 3. [x] Add focused regression tests and update user documentation.
-4. [ ] Run formatting and checks, review the diff, commit, push, and open the
-   requested pull request.
+4. [x] Run formatting and checks, review the diff, commit, and push.
+5. [ ] Open the requested pull request. Blocked: `context-dev/whip` is not a
+   resolvable GitHub repository; no alternate target was substituted.
 
 ## Adversarial review
 
