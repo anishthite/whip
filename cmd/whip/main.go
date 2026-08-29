@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -185,7 +186,7 @@ func main() {
 // -c and -r match Pi's current-project shortcuts.
 func sessionStart(resumeID string, continueRecent, browse bool) (tui.SessionStart, error) {
 	if (continueRecent && browse) || (resumeID != "" && (continueRecent || browse)) {
-		return tui.SessionStartNone, fmt.Errorf("choose only one of --resume, -c, or -r")
+		return tui.SessionStartNone, errors.New("choose only one of --resume, -c, or -r")
 	}
 	if continueRecent {
 		return tui.SessionStartContinue, nil
