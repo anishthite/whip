@@ -59,6 +59,7 @@ install script above.
 ```
 /context-doctor     audit what a fresh session injects, in tokens
 /goal <text>        work until done
+/whip up <prompt>   send a prompt through a normal agent turn
 /model              pick a model — type to filter (new) entries come from the
                     provider catalog, no config needed
 ```

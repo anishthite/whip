@@ -2580,6 +2580,16 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.input.Reset()
 				m.menu = nil
 				return m.command(text)
+			case isWhipCommand(text):
+				m.hist = append(m.hist, text)
+				m.histIdx = len(m.hist)
+				m.input.Reset()
+				m.menu = nil
+				if prompt, ok := whipPrompt(text); ok {
+					m.queue = append(m.queue, prompt)
+					return m, nil
+				}
+				return m.command(text)
 			case strings.HasPrefix(text, "!"): // shell escape runs now, not queued
 				m.hist = append(m.hist, text)
 				m.histIdx = len(m.hist)
@@ -3706,6 +3716,8 @@ func (m *model) command(text string) (tea.Model, tea.Cmd) {
 		m.exportCommand(strings.TrimSpace(strings.TrimPrefix(text, "/export")))
 	case "/report":
 		m.append(m.reportBlock())
+	case "/whip":
+		return m.whipCommand(text)
 	case "/help":
 		m.append(dimStyle.Render(helpText()))
 	case "/auth":

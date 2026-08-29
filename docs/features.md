@@ -418,6 +418,10 @@ relay: full device login + key mint, store round-trip, key validation),
   goroutine + `goalFromContextMsg` pattern, refusing while busy and running
   inline when headless. Tests: `goal_test.go` (`TestGoalFromContext*`).
   User-facing walkthrough: [goal-from-context.md](goal-from-context.md).
+- **`/whip up <prompt>`** starts a normal authored agent turn using only
+  `<prompt>`; the command prefix is not sent to the model. It is registered
+  with the TUI's single command registry, so `/help` and tab completion stay
+  in sync. Tests: `whip_cmd_test.go`.
 
 ## Conversation time travel
 
