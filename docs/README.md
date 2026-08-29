@@ -204,4 +204,7 @@ How it works, from the top down:
 - [roadmap.md](roadmap.md) — what's shipped vs. what's next,
   cross-referenced to the harnesses that inspired each item.
 - [learnings/](learnings/) — exploration reports from other
-  harnesses (pi, opencode, exo) that informed the design.
+  harnesses (pi, opencode, exo) that informed the design; the
+  [Bubble Tea coding-agent research](learnings/other-harnesses/bubbletea-coding-agents.md)
+  compares Crush, EVVA, and core-tui and contains the prioritized transcript,
+  resize, and UX plan for Loopy.
