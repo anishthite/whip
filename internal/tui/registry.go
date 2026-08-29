@@ -50,7 +50,6 @@ var registry = []registryEntry{
 	{Name: "/subagent", Hint: "[-m model[@provider]] <prompt> — spawn a background subagent yourself (works mid-turn)", Category: "Session"},
 	{Name: "/subagents", Hint: "[id] — background subagents: focus the dock, or open one subagent's live view (alias /tasks)", Keybind: "ctrl+t", Category: "Session"},
 	{Name: "/theme", Hint: "[light|dark|auto] — color scheme (bare opens the switcher)", Category: "Display"},
-	{Name: "/whip", Hint: "up <prompt> — start an agent turn with the prompt", Category: "Agent"},
 	{Name: "!cmd", Hint: "— run a shell command locally; output lands in the transcript and the conversation", Category: "App"},
 }
 

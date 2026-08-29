@@ -105,6 +105,15 @@ func main() {
 		return
 	}
 
+	// `whip up ...` — a quick shell spelling for a one-shot agent prompt.
+	if flag.NArg() > 0 && flag.Arg(0) == "up" {
+		if err := upCLI(flag.Args()[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "whip:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// `whip browser ...` — browser tooling (install the drive-my-tab extension).
 	// `whip sessions` — list stored sessions (the scriptable companion to run).
 	if flag.NArg() > 0 && flag.Arg(0) == "sessions" {

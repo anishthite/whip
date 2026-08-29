@@ -46,10 +46,10 @@ func runFixture(t *testing.T, reply string, reqs *[]llm.Request) {
 	}
 }
 
-// runCapture swaps stdout/stdin for the duration of runCLI and returns what
-// the run printed on stdout. stdinData is piped in ("" still leaves a
+// captureCLI swaps stdout/stdin for the duration of a headless command and
+// returns what it printed on stdout. stdinData is piped in ("" still leaves a
 // non-TTY empty stdin, like `whip run "…" < /dev/null`).
-func runCapture(t *testing.T, stdinData string, args ...string) (string, error) {
+func captureCLI(t *testing.T, stdinData string, cli func([]string) error, args ...string) (string, error) {
 	t.Helper()
 
 	oldIn := os.Stdin
@@ -75,12 +75,17 @@ func runCapture(t *testing.T, stdinData string, args ...string) (string, error) 
 	done := make(chan struct{})
 	go func() { io.Copy(&buf, outR); close(done) }()
 
-	runErr := runCLI(args)
+	runErr := cli(args)
 
 	outW.Close()
 	<-done
 	outR.Close()
 	return buf.String(), runErr
+}
+
+func runCapture(t *testing.T, stdinData string, args ...string) (string, error) {
+	t.Helper()
+	return captureCLI(t, stdinData, runCLI, args...)
 }
 
 // text mode streams the assistant reply to stdout.
