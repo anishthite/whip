@@ -5,6 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/user"
+	"runtime"
+	"time"
 
 	"github.com/context-labs/whip/internal/agent"
 	"github.com/context-labs/whip/internal/config"
@@ -24,10 +27,20 @@ func cwd() string {
 	return wd
 }
 
+// username is the OS login name, or "unknown" when it can't be resolved
+// (e.g. inside a container without a passwd entry).
+func username() string {
+	u, err := user.Current()
+	if err != nil || u.Username == "" {
+		return "unknown"
+	}
+	return u.Username
+}
+
 // systemPrompt builds the base system prompt rooted at wd. The TUI and
 // `whip run` pass the process cwd; `whip acp` passes the client-provided
 // session cwd (the editor spawns whip wherever it likes).
-func systemPrompt(wd string) string {
+func systemPrompt(wd string, now time.Time) string {
 	prompt := `You are an expert coding assistant operating inside whip, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
 
 Available tools:
@@ -51,10 +64,17 @@ Operating rules:
 - Bias toward acting on reasonable assumptions. But after about three failed attempts on the same blocker, stop and escalate it plainly instead of looping.
 - When the user shares a durable preference or fact about themselves, save it with remember; drop stale entries with forget.
 - Git hygiene: review the staged diff for secrets before committing, never run git add . — stage only the files you intend — and never force-push.
+- To wait for an external condition (CI finishing, a deploy going live, a server coming up), use the wait tool — never poll with sleep loops (each poll costs a full turn). You will be notified once when the condition changes.
 
 whip's own docs (features, tools, configuration, MCP servers, skills) live at https://github.com/context-labs/whip/tree/main/docs — consult them when the user asks how to configure or extend whip itself.
 
-Current working directory: ` + wd
+Here is some useful information about the environment you are running in:
+<env>
+  Working directory: ` + wd + `
+  Platform: ` + runtime.GOOS + `
+  Current date/time: ` + now.Format("Mon Jan 2, 2006 15:04:05 MST (UTC-07:00)") + `
+  User: ` + username() + `
+</env>`
 	if extra := config.MeInstructions(); extra != "" {
 		prompt += "\n\nStanding instructions from the user (~/.whip/me.md — treat as user rules):\n" + extra
 	}
@@ -141,6 +161,11 @@ func main() {
 		return
 	}
 
+	// The setup wizard triggers on "no config file AND no setup-done marker":
+	// Load creates the config on first run, so only a pre-Load stat can tell
+	// this install has never launched — and the marker keeps a subcommand's
+	// Load (whip auth/run/mcp/…) from permanently consuming the first run.
+	firstRun := !config.Exists() && !config.SetupDone()
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "whip:", err)
@@ -154,7 +179,7 @@ func main() {
 			os.Exit(1)
 		}
 		_ = prov.Key()
-		_ = agent.New(llm.New(prov.BaseURL, "bench"), id, mdl.MaxTokens, systemPrompt(cwd()))
+		_ = agent.New(llm.New(prov.BaseURL, "bench"), id, mdl.MaxTokens, systemPrompt(cwd(), time.Now()))
 		return
 	}
 
@@ -163,7 +188,7 @@ func main() {
 	// notice still shows on the next launch.
 	go update.Check(version)
 	tui.Version = version // /report names the build in the bug-report bundle
-	sessionID, err := tui.Run(cfg, *modelFlag, *providerFlag, systemPrompt(cwd()), *resumeFlag, *cautiousFlag)
+	sessionID, err := tui.Run(cfg, *modelFlag, *providerFlag, systemPrompt(cwd(), time.Now()), *resumeFlag, *cautiousFlag, firstRun)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "whip:", err)
 		os.Exit(1)

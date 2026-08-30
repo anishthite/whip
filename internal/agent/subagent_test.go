@@ -3,6 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -80,5 +83,108 @@ func TestStartBackgroundSlugID(t *testing.T) {
 	<-task.Done
 	if !strings.HasPrefix(task.ID, "survey-context-growth-in-codex-") {
 		t.Fatalf("task id should be a description slug, got %q", task.ID)
+	}
+}
+
+// A background subagent registers in the task registry (dock row + badge via
+// OnChange) BEFORE the synchronous worktree provision runs, so the dock shows
+// the row even while git worktree add is still working (spawn-lag fix). The
+// provisioned path reaches the subagent as its first steered message at launch
+// — drained at the turn's first loop boundary, deterministic delivery.
+func TestBackgroundWorktreeRegistersBeforeProvisioning(t *testing.T) {
+	if os.Getenv("WHIP_SKIP_WORKTREE_TEST") == "1" {
+		t.Skip("skipped via WHIP_SKIP_WORKTREE_TEST")
+	}
+	ctx := context.Background()
+	repo := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init")
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-m", "init")
+	t.Chdir(repo)
+
+	srv, _ := modelRecorder(t, "done")
+	defer srv.Close()
+	ag := New(llm.New(srv.URL, "k"), "m", 100, "sys")
+	ag.WorktreeSubagents = true
+
+	// Registration order probe: OnChange must fire before the tool result
+	// returns (which happens after provision + launch).
+	registeredBeforeReturn := false
+	ag.Tasks().OnChange = func(*BackgroundTask) { registeredBeforeReturn = true }
+
+	out, err := findTool(t, ag, "subagent").Run(ctx, json.RawMessage(`{"prompt":"go","background":true}`))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !registeredBeforeReturn {
+		t.Fatal("the task row must register before the tool call returns (spawn lag)")
+	}
+	tasks := ag.Tasks().List()
+	if len(tasks) != 1 {
+		t.Fatalf("expected the task registered before the call returned, got %d", len(tasks))
+	}
+	if !strings.Contains(out, "worktree") {
+		t.Fatalf("with isolation on, the result should name the worktree: %q", out)
+	}
+	found := false
+	// The worktree instruction is steered in at launch; wait for the task to
+	// settle so Messages holds the full conversation.
+	<-tasks[0].Done
+	for _, msg := range tasks[0].sub.Messages {
+		if msg.Role == "user" && strings.Contains(msg.Content, "git worktree at") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("worktree path should reach the subagent as its first steered message")
+	}
+	ag.Tasks().Cancel(tasks[0].ID)
+}
+
+// StartBackground attributes the transcript to the SUBAGENT's model, not the
+// parent's: a TaskDefault or per-task override routes the sub to a different
+// model, and t.SubModel must record that resolved id so the persisted
+// transcript isn't mislabeled with the parent's model.
+func TestStartBackgroundCapturesSubModel(t *testing.T) {
+	srv, _ := modelRecorder(t, "ok")
+	defer srv.Close()
+
+	// Parent on "parent-m"; TaskDefault routes subs to "sub-default-m".
+	parent := New(llm.New(srv.URL, "k"), "parent-m", 100, "sys")
+	parent.TaskDefault = SubModel{Client: llm.New(srv.URL, "k"), Model: "sub-default-m"}
+
+	// Default route → the sub runs the TaskDefault model.
+	def := parent.StartBackground("uses default", "p", SubModel{})
+	<-def.Done
+	if def.SubModel != "sub-default-m" {
+		t.Fatalf("default route: SubModel = %q, want sub-default-m", def.SubModel)
+	}
+
+	// Per-task override → the sub runs the override model.
+	ov := parent.StartBackground("uses override", "p", SubModel{Client: llm.New(srv.URL, "k"), Model: "sub-override-m"})
+	<-ov.Done
+	if ov.SubModel != "sub-override-m" {
+		t.Fatalf("override route: SubModel = %q, want sub-override-m", ov.SubModel)
+	}
+
+	// No TaskDefault and no override → falls through to the parent's model.
+	bare := New(llm.New(srv.URL, "k"), "parent-m", 100, "sys")
+	own := bare.StartBackground("uses parent", "p", SubModel{})
+	<-own.Done
+	if own.SubModel != "parent-m" {
+		t.Fatalf("parent route: SubModel = %q, want parent-m", own.SubModel)
 	}
 }
