@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/context-labs/whip/internal/llm"
 )
 
 // TaskStatus is the lifecycle of a background subagent.
@@ -39,14 +41,84 @@ type BackgroundTask struct {
 	// never live, and the dock leaves it out.
 	Restored bool
 
-	Done   chan struct{}      // closed on settle; <-Done() wakes all waiters
-	cancel context.CancelFunc // cancels the subagent's turn
+	Done chan struct{} // closed on settle; <-Done() wakes all waiters
+	// ctx/cancel are the task's own context: cancel kills the subagent's turn.
+	// ctx rides along so launchBackground (split from RegisterBackground for
+	// the spawn-lag fix) can start the turn after a worktree provision
+	// intervened between the two.
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	// sub is the retained subagent: while running it receives SteerTask
 	// guidance, and after settle FollowupTask keeps chatting on its preserved
 	// context. nil on restored tasks (their process died). Set before the
 	// task is published, never reassigned — snapshots copy the pointer safely.
 	sub *Agent
+
+	// SubMessages is the subagent's full conversation, snapshotted at settle
+	// for persistence (the TUI's OnRecord saves it as an attributed session).
+	// A copy, not a live alias — FollowupTask keeps appending to sub.Messages
+	// after settle, and a shared slice would let a follow-up mutate an
+	// already-saved snapshot. nil while running and on restored tasks.
+	SubMessages []llm.Message
+
+	// SubModel names the route the subagent actually ran on, for transcript
+	// attribution — the sub often runs a DIFFERENT model than the parent
+	// (TaskDefault or a per-task override), so persisting the parent's model
+	// would mislabel the transcript. Captured at StartBackground from the
+	// resolved sub, before any turn runs.
+	SubModel string
+}
+
+// JournaledEvent is one recorded task event. Kind mirrors the TUI's
+// taskEventMsg kinds: 0 text, 1 tool start, 2 tool end, 3 steer, 4 compact.
+// S/S2 carry the payload (text / tool name+args / tool result). Consecutive
+// text deltas coalesce into one entry so long streams don't fill the slice.
+type JournaledEvent struct {
+	Kind  int
+	S, S2 string
+}
+
+// taskJournal is a per-task ring of recent events, byte-bounded so a chatty
+// subagent can't grow memory without limit. Over budget → drop from the front
+// and mark Truncated (the detail view renders a "[earlier output dropped]"
+// header line instead of pretending the transcript is complete).
+type taskJournal struct {
+	events    []JournaledEvent
+	bytes     int
+	Truncated bool
+}
+
+// journalBudget caps one task's journal at 128KB of payload text. Sized to
+// hold a typical exploration's full transcript (tool outputs dominate) while
+// bounding a registry full of tasks at single-digit MB.
+const journalBudget = 128 * 1024
+
+// append records one event, coalescing consecutive text deltas (kind 0) into
+// the previous entry — the stream emits one event per SSE delta.
+func (j *taskJournal) append(kind int, s, s2 string) {
+	if kind == 0 && len(j.events) > 0 && j.events[len(j.events)-1].Kind == 0 {
+		j.events[len(j.events)-1].S += s
+		j.bytes += len(s)
+	} else {
+		j.events = append(j.events, JournaledEvent{Kind: kind, S: s, S2: s2})
+		j.bytes += len(s) + len(s2)
+	}
+	for j.bytes > journalBudget && len(j.events) > 1 {
+		j.bytes -= len(j.events[0].S) + len(j.events[0].S2)
+		j.events = j.events[1:]
+		j.Truncated = true
+	}
+	// A pure-text stream (no interleaving tool calls) coalesces into ONE
+	// entry, which the front-drop loop above can't touch (it keeps len>=1) —
+	// without this tail cap the "bounded at 128KB" guarantee is false for the
+	// one case a long uninterrupted answer hits.
+	if len(j.events) == 1 && len(j.events[0].S) > journalBudget {
+		drop := len(j.events[0].S) - journalBudget
+		j.events[0].S = j.events[0].S[drop:]
+		j.bytes -= drop
+		j.Truncated = true
+	}
 }
 
 // taskRegistry tracks background subagents for one parent agent. It is the
@@ -56,6 +128,12 @@ type BackgroundTask struct {
 type taskRegistry struct {
 	mu    sync.Mutex
 	tasks map[string]*BackgroundTask
+	// journals record each task's emitted events so a detail view opened
+	// mid-run (or after settle) replays the full transcript instead of only
+	// what streams in after Subscribe. Written under mu in emitter(); read
+	// under mu by SubscribeWithJournal. Entries die with their task in
+	// ClearSettled.
+	journals map[string]*taskJournal
 	// subs are live event subscribers per task id (the TUI's per-task view).
 	// Events is all callbacks, so fan-out is a slice the worker walks per
 	// event — no channel to close, no per-subscriber goroutine. Kept here
@@ -96,7 +174,7 @@ func (r *taskRegistry) recordSession() string {
 }
 
 func newTaskRegistry() *taskRegistry {
-	return &taskRegistry{tasks: map[string]*BackgroundTask{}, subs: map[string][]Events{}}
+	return &taskRegistry{tasks: map[string]*BackgroundTask{}, subs: map[string][]Events{}, journals: map[string]*taskJournal{}}
 }
 
 // List returns a snapshot of all tasks, oldest first.
@@ -181,6 +259,7 @@ func (r *taskRegistry) ClearSettled(keep ...string) int {
 		if !slices.Contains(keep, id) && t.Status != TaskRunning {
 			delete(r.tasks, id)
 			delete(r.subs, id)
+			delete(r.journals, id)
 			n++
 		}
 	}
@@ -240,6 +319,19 @@ var taskIDCounter atomic.Int64
 // There is no ctx parameter on purpose: a background task outlives the turn
 // that started it, so it owns its own cancellable context.
 func (a *Agent) StartBackground(description, prompt string, o SubModel) *BackgroundTask {
+	t := a.RegisterBackground(description, prompt, o)
+	a.launchBackground(t)
+	return t
+}
+
+// RegisterBackground inserts the task row and fires OnChange/OnRecord WITHOUT
+// starting the turn goroutine. Split from StartBackground so the tool layer
+// can show the dock row before a synchronous worktree provision delays it
+// (spawn-lag fix): register → provision → LaunchBackground. Callers that skip
+// provisioning should use StartBackground directly. The task is live from
+// this point — Cancel/Steer/Done are all initialized; only the turn isn't
+// running yet.
+func (a *Agent) RegisterBackground(description, prompt string, o SubModel) *BackgroundTask {
 	if a.bg == nil {
 		a.bg = newTaskRegistry()
 	}
@@ -255,8 +347,15 @@ func (a *Agent) StartBackground(description, prompt string, o SubModel) *Backgro
 	t := &BackgroundTask{
 		ID: id, Description: description, Prompt: prompt,
 		Status: TaskRunning, StartedAt: time.Now(),
-		Done: make(chan struct{}), cancel: cancel,
+		Done: make(chan struct{}), ctx: taskCtx, cancel: cancel,
 		sub: sub,
+		// Attribute the transcript to the route the sub actually runs on.
+		// sub.Model is the resolved API id (TaskDefault → per-task override →
+		// parent's, per newSub's precedence) — often NOT the parent's model,
+		// so persisting the parent's model/provider would mislabel it. The
+		// provider isn't recoverable here (SubModel carries only client+API
+		// id), so it's left for the caller to keep blank.
+		SubModel: sub.Model,
 	}
 	a.bg.mu.Lock()
 	a.bg.tasks[id] = t
@@ -267,7 +366,26 @@ func (a *Agent) StartBackground(description, prompt string, o SubModel) *Backgro
 	if a.bg.OnRecord != nil {
 		a.bg.OnRecord(a.bg.recordSession(), t)
 	}
+	return t
+}
 
+// LaunchBackground starts a registered task's turn goroutine — the second
+// half of StartBackground. The worktree path (if the task provisioned one
+// between register and launch) is steered in as the subagent's first message
+// rather than baked into the initial prompt: the prompt was already persisted
+// by OnRecord at register time, and a late-arriving path instruction reads
+// the same to the model either way.
+func (a *Agent) LaunchBackground(t *BackgroundTask, worktreePath string) {
+	if worktreePath != "" {
+		t.sub.Steer("Work entirely inside the git worktree at " + worktreePath + " (run `cd " + worktreePath + "` first; it is your own branch, isolated from other agents). Commit your changes there.")
+	}
+	a.launchBackground(t)
+}
+
+// launchBackground is the shared goroutine half.
+func (a *Agent) launchBackground(t *BackgroundTask) {
+	id, description, prompt := t.ID, t.Description, t.Prompt
+	taskCtx := t.ctx
 	go func() {
 		report, err := t.sub.Turn(taskCtx, prompt, FanIn(a.bg.emitter(id), Events{OnUsage: a.AddUsage}))
 		status := TaskDone
@@ -278,6 +396,9 @@ func (a *Agent) StartBackground(description, prompt string, o SubModel) *Backgro
 		case err != nil:
 			status, text = TaskError, err.Error()
 		}
+		// Snapshot the transcript BEFORE settle: settle fires OnRecord (which
+		// persists SubMessages), so it must be populated first.
+		t.SubMessages = t.sub.MessagesSnapshot()
 		a.bg.settle(id, status, text)
 		// subscribers stop here; late events after settle go nowhere (Subscribe
 		// rejects non-running tasks, and settled state is visible via List/Get)
@@ -289,95 +410,152 @@ func (a *Agent) StartBackground(description, prompt string, o SubModel) *Backgro
 		// text/status are locals (not the shared task struct), so no race.
 		a.Steer(fmt.Sprintf("[subagent %s %s] %s\n\n%s", id, status, description, text))
 	}()
-	return t
 }
 
-// Subscribe registers a live event subscriber for a running task. Returns
-// false when the task is unknown or already settled — the caller should then
-// render the stored Report instead of a live stream.
-func (r *taskRegistry) Subscribe(id string, ev Events) bool {
+// refreshTranscript re-snapshots a settled task's SubMessages after a
+// follow-up turn grew the sub's conversation, then re-fires OnRecord so the
+// persisted transcript stays current. A follow-up turn is the only thing that
+// mutates a settled task's messages, so this is the only refresh path.
+func (r *taskRegistry) refreshTranscript(id string, sub *Agent) {
+	r.mu.Lock()
+	t, ok := r.tasks[id]
+	if ok {
+		t.SubMessages = sub.MessagesSnapshot()
+	}
+	r.mu.Unlock()
+	if !ok || r.OnRecord == nil {
+		return
+	}
+	r.OnRecord(r.recordSession(), t)
+}
+
+// SubscribeWithJournal returns the task's journaled events so far and, when
+// the task is still running, registers ev as a live subscriber — atomically
+// under one lock hold, so no event between the replay point and the
+// subscription is missed or delivered twice. Running reports ok=true; a
+// settled (or restored) task reports ok=false and the caller renders the
+// journal as history. Returns false with a nil journal for unknown ids.
+func (r *taskRegistry) SubscribeWithJournal(id string, ev Events) (events []JournaledEvent, truncated, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	t, ok := r.tasks[id]
-	if !ok || t.Status != TaskRunning {
-		return false
+	t, exists := r.tasks[id]
+	if !exists {
+		return nil, false, false
+	}
+	j := r.journals[id]
+	if j != nil {
+		events = append([]JournaledEvent(nil), j.events...)
+		truncated = j.Truncated
+	}
+	if t.Status != TaskRunning {
+		return events, truncated, false
 	}
 	r.subs[id] = append(r.subs[id], ev)
-	return true
+	return events, truncated, true
 }
 
-// emitter returns an Events that forwards every callback to the task's
-// current subscribers (the TUI's per-task view). Subscriber callbacks run on
-// the worker goroutine, so they must be cheap and non-blocking.
+// emitter returns an Events that journals every callback and forwards it to
+// the task's current subscribers (the TUI's per-task view). Subscriber
+// callbacks run on the worker goroutine, so they must be cheap and
+// non-blocking. Tool calls stream in as args deltas (OnToolCall); only the
+// start (kind 1) and end (kind 2) are journaled — the deltas would fill the
+// journal with partial JSON.
+//
+// emitLocked folds the journal append and the subscriber snapshot into a
+// single registry lock hold so an event can never be both replayed from the
+// journal AND delivered live to the same view: a SubscribeWithJournal that
+// runs before emitLocked sees the event in the journal (and the subscriber
+// isn't registered yet, so it's not in the snapshot); one that runs after
+// finds the event already journaled and the subscriber registered for the
+// NEXT event. The two-orderings-are-exhaustive property is what makes the
+// replay→live seam neither drop nor double an event.
+//
+// Callbacks run AFTER the lock is released (the snapshot is taken under it):
+// subscribers are allowed to block (the TUI's task view funnels events
+// through prog.Send, which parks when the UI event queue backs up), and a
+// blocked callback must never hold mu hostage — the UI goroutine itself takes
+// mu via List/Get when rendering the dock, so running a blocking callback
+// under the lock is an ABBA deadlock (worker holds mu → waits on the UI
+// queue; UI waits on mu).
+func (r *taskRegistry) emitLocked(id string, kind int, s, s2 string, journaled bool) []Events {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if journaled {
+		j := r.journals[id]
+		if j == nil {
+			j = &taskJournal{}
+			r.journals[id] = j
+		}
+		j.append(kind, s, s2)
+	}
+	return append([]Events(nil), r.subs[id]...)
+}
+
+// emitter returns an Events that journals every callback and forwards it to
+// the task's current subscribers (the TUI's per-task view). Subscriber
+// callbacks run on the worker goroutine, so they must be cheap and
+// non-blocking. Tool calls stream in as args deltas (OnToolCall); only the
+// start (kind 1) and end (kind 2) are journaled — the deltas would fill the
+// budget with partial JSON. Compaction is NOT journaled: kind 4 is reserved
+// for the TUI's follow-up-settled message, and replaying a compact as if it
+// were a settle would render it as an error.
 func (r *taskRegistry) emitter(id string) Events {
 	return Events{
 		OnText: func(s string) {
-			r.broadcast(id, func(e Events) {
+			subs := r.emitLocked(id, 0, s, "", true)
+			for _, e := range subs {
 				if e.OnText != nil {
 					e.OnText(s)
 				}
-			})
+			}
 		},
 		OnThink: func(s string) {
-			r.broadcast(id, func(e Events) {
+			for _, e := range r.emitLocked(id, 0, "", "", false) {
 				if e.OnThink != nil {
 					e.OnThink(s)
 				}
-			})
+			}
 		},
 		OnToolStart: func(tcID, n, a string) {
-			r.broadcast(id, func(e Events) {
+			subs := r.emitLocked(id, 1, n, a, true)
+			for _, e := range subs {
 				if e.OnToolStart != nil {
 					e.OnToolStart(tcID, n, a)
 				}
-			})
+			}
 		},
 		OnToolCall: func(tcID, n, a string) {
-			r.broadcast(id, func(e Events) {
+			for _, e := range r.emitLocked(id, 0, "", "", false) {
 				if e.OnToolCall != nil {
 					e.OnToolCall(tcID, n, a)
 				}
-			})
+			}
 		},
 		OnToolEnd: func(tcID, n, res string) {
-			r.broadcast(id, func(e Events) {
+			subs := r.emitLocked(id, 2, n, res, true)
+			for _, e := range subs {
 				if e.OnToolEnd != nil {
 					e.OnToolEnd(tcID, n, res)
 				}
-			})
+			}
 		},
 		OnSteer: func(s string) {
-			r.broadcast(id, func(e Events) {
+			subs := r.emitLocked(id, 3, s, "", true)
+			for _, e := range subs {
 				if e.OnSteer != nil {
 					e.OnSteer(s)
 				}
-			})
+			}
 		},
 		OnCompact: func(took, kept int) {
-			r.broadcast(id, func(e Events) {
+			// journaled=false: kind 4 is follow-up-settled in the TUI, so a
+			// journaled compact would replay as an error line.
+			for _, e := range r.emitLocked(id, 0, "", "", false) {
 				if e.OnCompact != nil {
 					e.OnCompact(took, kept)
 				}
-			})
+			}
 		},
-	}
-}
-
-// broadcast runs a subscriber callback for each of the task's subscribers.
-// The slice is snapshotted under the registry lock, then callbacks run AFTER
-// the lock is released: subscribers are allowed to block (the TUI's task view
-// funnels events through prog.Send, which parks when the UI event queue is
-// backed up), and a blocked callback must never hold mu hostage — the UI
-// goroutine itself takes mu via List/Get when rendering the dock, so running
-// a blocking callback under the lock is an ABBA deadlock (worker holds mu →
-// waits on the UI queue; UI waits on mu). settle deletes the entry, so
-// post-settle events (there should be none) go nowhere.
-func (r *taskRegistry) broadcast(id string, call func(Events)) {
-	r.mu.Lock()
-	subs := append([]Events(nil), r.subs[id]...)
-	r.mu.Unlock()
-	for _, e := range subs {
-		call(e)
 	}
 }
 

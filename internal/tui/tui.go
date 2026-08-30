@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -87,14 +88,16 @@ type turnDoneMsg struct {
 	clean bool   // the turn left the tree clean — snap is worthless, drop it
 }
 type (
-	catalogsMsg   map[string]config.Catalog // background /models fetch result
-	noticeMsg     string                    // dim one-liner appended to the transcript
-	usageMsg      llm.Usage                 // one request's token usage
-	quitArmMsg    struct{}                  // the idle ctrl+c arm window expired
-	taskUpdateMsg struct{}                  // a background subagent started/settled — redraw
-	mcpStatusMsg  struct{}                  // an MCP server changed state — redraw
-	thinkMsg      string                    // streamed reasoning tokens
-	imageMsg      struct {                  // ctrl+v clipboard image result
+	catalogsMsg    map[string]config.Catalog // background /models fetch result
+	noticeMsg      string                    // dim one-liner appended to the transcript
+	usageMsg       llm.Usage                 // one request's token usage
+	quitArmMsg     struct{}                  // the idle ctrl+c arm window expired
+	taskUpdateMsg  struct{}                  // a background subagent started/settled — redraw
+	waitWakeMsg    string                    // an idle wait fired — wake as a machine turn
+	orphanSteerMsg string                    // a steer orphaned at turn teardown — submit as a machine turn
+	mcpStatusMsg   struct{}                  // an MCP server changed state — redraw
+	thinkMsg       string                    // streamed reasoning tokens
+	imageMsg       struct {                  // ctrl+v clipboard image result
 		path string // clipboard image saved to disk
 		err  error
 	}
@@ -178,15 +181,22 @@ type model struct {
 
 	pendingForkID string // busy-forked copy awaiting the turn's end to switch into ("" = none)
 
-	mouseOn      bool       // runtime mouse-capture state (toggle with /mouse)
-	sel          *selection // in-flight/last drag selection over the transcript
-	selDragX     int        // last drag pointer position (edge auto-scroll re-checks it)
-	selDragY     int
-	vpLead       int    // top blank rows viewportView last dropped (selection row mapping)
-	viewTop      int    // screen row of the view's first line (View tracks it; mouse Y is absolute)
-	viewH        int    // height of the last rendered view
-	themeHow     string // how auto theme detection resolved (env var, OSC query, …) — captured at startup/theme change for /report; never re-queried
-	compactModel string // config model name for compaction summaries; "" = the built-in default
+	mouseOn  bool       // runtime mouse-capture state (toggle with /mouse)
+	sel      *selection // in-flight/last drag selection over the transcript
+	selDragX int        // last drag pointer position (edge auto-scroll re-checks it)
+	selDragY int
+	// Input box selection tracking: View records the input's absolute screen
+	// rows so drag-select can hit-test/extract/highlight it. inputBodyOff is
+	// the line offset within viewBody where the input starts; inputTop is the
+	// absolute screen row (viewTop + inputBodyOff), -1 when hidden.
+	inputBodyOff int
+	inputTop     int
+	inputLines   []string // the input box's rendered lines, ANSI-stripped
+	vpLead       int      // top blank rows viewportView last dropped (selection row mapping)
+	viewTop      int      // screen row of the view's first line (View tracks it; mouse Y is absolute)
+	viewH        int      // height of the last rendered view
+	themeHow     string   // how auto theme detection resolved (env var, OSC query, …) — captured at startup/theme change for /report; never re-queried
+	compactModel string   // config model name for compaction summaries; "" = the built-in default
 	compactProv  string
 	// updateLatest is a pending newer release tag ("" when none), picked up
 	// from update.Pending at startup; the notice it renders is durable, so a
@@ -238,7 +248,7 @@ type picker struct {
 // Newlines come from ctrl+j / shift+enter / alt+enter; plain enter submits.
 func newInput() textarea.Model {
 	ti := textarea.New()
-	ti.Placeholder = "Ask whip anything… (/ for commands, tab completes)"
+	ti.Placeholder = inputPlaceholder
 	ti.Prompt = "┃ "
 	ti.SetHeight(1)
 	ti.MaxHeight = 24 // input grows with content up to this many lines
@@ -276,15 +286,31 @@ var (
 )
 
 // Run starts the interactive session. It returns the id of the session that
-// was active on exit ("" if nothing was said).
-func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string, cautious bool) (string, error) {
+// was active on exit ("" if nothing was said). firstRun reports the config
+// file did not exist at startup (the caller checks config.Exists before
+// config.Load creates it) and triggers the one-time setup wizard.
+func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string, cautious, firstRun bool) (string, error) {
+	// One shared stdin reader for the pre-TUI prompts: a bufio.Reader reads
+	// ahead, so separate readers for the trust gate and the setup wizard would
+	// lose buffered answers (a pasted "y\n2\n…\n" answers both).
+	stdinR := bufio.NewReader(os.Stdin)
+
 	// Trust gate first: before whip reads a single file, ask whether this
 	// folder's contents may steer the model. Persisted per absolute path in
 	// ~/.whip/trusted.json (claude-code's per-project trust dialog).
-	if ok, err := checkTrust(); err != nil {
+	if ok, err := checkTrust(stdinR); err != nil {
 		return "", err
 	} else if !ok {
 		return "", errors.New("folder not trusted")
+	}
+
+	// First run only: the setup wizard (provider, thinking display, MCP
+	// imports) before the TUI takes the terminal. Skipped silently when stdin
+	// isn't a terminal — headless launches keep the defaults.
+	if firstRun {
+		if err := setupWizard(cfg, stdinR); err != nil {
+			return "", err
+		}
 	}
 
 	ag, mn, pn, err := buildAgentWithRefresh(cfg, modelName, provName, sysPrompt)
@@ -340,17 +366,7 @@ func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string, ca
 		if len(merged) > 0 || len(disc.Blocked) > 0 || len(mcpErrs) > 0 {
 			m.mcpMgr = mcp.NewManager(merged)
 			m.mcpMgr.SetBlocked(disc.Blocked)
-			// MCP connects settle in the background; push each new tool set
-			// into the CURRENT agent (mutex-guarded on the agent side) so
-			// servers that connect after turn 1 show up without a restart.
-			// The closure reads m.agent at call time: resume/model-switch
-			// replace the agent, and wireTasks re-points the manager at it.
-			m.mcpMgr.SetOnChange(func() {
-				m.agent.SetMCPTools(m.mcpMgr.Tools())
-				if m.prog != nil { // nil in headless tests
-					m.prog.Send(mcpStatusMsg{})
-				}
-			})
+			m.mcpMgr.SetOnChange(m.mcpOnChange())
 			m.mcpMgr.Start(context.Background())
 			ag.SetMCPTools(m.mcpMgr.Tools())
 			for src, derr := range mcpErrs {
@@ -629,7 +645,7 @@ func refreshCatalogs(cfg *config.Config, force bool) map[string]config.Catalog {
 func (m *model) fetchCatalogs(force bool) {
 	cats := refreshCatalogs(m.cfg, force)
 	if m.prog != nil { // nil in tests that drive the command dispatch directly
-		m.prog.Send(catalogsMsg(cats))
+		m.prog.Send(catalogsMsg(cats)) //nolint:uilock // background: fetchCatalogs is always `go`-launched
 	}
 }
 
@@ -2109,12 +2125,44 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case orphanSteerMsg:
+		// A steer arrived after the drain snapshot at turn teardown and was
+		// orphaned. The agent can't message the TUI itself (same seam as
+		// waitWakeMsg) — it surfaced the steer through OnOrphanedSteer; run it
+		// as a machine turn so the steer is never lost.
+		if !m.busy {
+			return m.submitTurn(string(msg), true)
+		}
+		return m, nil
+
+	case waitWakeMsg:
+		// An idle wait fired: wake as a machine-authored turn (the opencode/
+		// exo wake pattern). If a turn started between the wait's TurnRunning
+		// check and this message, steer into the live turn instead of
+		// double-submitting — a steer parks until the next loop boundary.
+		m.append(dimStyle.Render("⏲ " + firstLine(string(msg))))
+		if m.busy {
+			m.agent.Steer(string(msg))
+			return m, nil
+		}
+		return m.submitTurn(string(msg), false)
+
 	case mcpStatusMsg:
 		// An MCP server changed state. Announce each server's FIRST settle in
 		// the transcript (one line, once per session per server) so arrivals
 		// and failures are visible without typing /mcp — later transitions
-		// (auto-reconnect, toggles) stay quiet to avoid flapping noise.
+		// (auto-reconnect, toggles) stay quiet to avoid flapping noise. An open
+		// MCPs palette panel rebuilds its rows so a background settle ("◌
+		// connecting…" → "● N tools") shows without the user re-opening it.
 		if m.mcpMgr != nil {
+			if m.palette != nil {
+				if pp := m.palette.top(); pp != nil && pp.kind == panelMCP {
+					pp.mcps = m.buildMCPRows()
+					if pp.midx >= len(pp.mcps) {
+						pp.midx = len(pp.mcps) - 1
+					}
+				}
+			}
 			if m.mcpSeen == nil {
 				m.mcpSeen = map[string]bool{}
 			}
@@ -2146,27 +2194,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if tv == nil || msg.id != tv.id {
 			return m, nil
 		}
-		switch msg.kind {
-		case 0: // text delta
-			tv.buf.WriteString(msg.s)
-		case 1: // tool start
-			fmt.Fprintf(&tv.buf, "\n%s %s %s\n", toolStyle.Render("⚒"), msg.s, dimStyle.Render(msg.s2))
-		case 2: // tool end
-			preview := strings.Split(strings.TrimRight(msg.s2, "\n"), "\n")
-			if len(preview) > 4 {
-				preview = append(preview[:4], fmt.Sprintf("… +%d lines", len(msg.s2)-4))
-			}
-			fmt.Fprintf(&tv.buf, "%s\n", dimStyle.Render("  "+strings.Join(preview, "\n  ")))
-		case 3: // a steered message reached the running subagent (task_steer / chat)
-			fmt.Fprintf(&tv.buf, "\n%s %s\n", youStyle.Render("↪ steered:"), msg.s)
-		case 4: // follow-up turn settled; unlock the chat input
+		if msg.kind == 4 { // follow-up turn settled; unlock the chat input
 			tv.busy, tv.followCancel = false, nil
-			if msg.s != "" {
-				fmt.Fprintf(&tv.buf, "\n%s\n", errStyle.Render(msg.s))
-			} else {
-				tv.buf.WriteString("\n")
-			}
 		}
+		renderTaskEvent(&tv.buf, msg.kind, msg.s, msg.s2)
 		m.refreshTaskVP()
 		return m, nil
 
@@ -2554,9 +2585,9 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.tasksFocus { // open the selected task's detail view
 			m.tasksFocus = false
-			// dockTasks is time-dependent (settled tasks age out after
-			// dockSettledGrace), so the strip can go empty — or shrink below
-			// taskSel — between the last paint and this keypress
+			// settled tasks linger in the dock until the user sends a new
+			// message, so the strip is stable between the last paint and this
+			// keypress; the list can still be empty (or smaller than taskSel)
 			if tasks := m.dockTasks(); len(tasks) > 0 {
 				m.openTask(tasks[min(m.taskSel, len(tasks)-1)].ID)
 			}
@@ -2586,6 +2617,17 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.input.Reset()
 				m.menu = nil
 				m.runShell(text)
+			case text != "" && m.agent.WaitingOnSubagents():
+				// The turn is blocked only on subagents — steer the message in
+				// as a mid-turn correction instead of queueing it behind the
+				// whole turn (it isn't an interruption if the agent is just
+				// waiting). Echo it like a steered background-task report.
+				m.hist = append(m.hist, text)
+				m.histIdx = len(m.hist)
+				m.input.Reset()
+				m.menu = nil
+				m.agent.Steer(text)
+				m.append(youStyle.Render("❯ ") + linkifyFilePaths(text, realFileExists) + dimStyle.Render("  (steered)"))
 			case text != "": // codex-style: queue it (multiple allowed)
 				m.queue = append(m.queue, text)
 				m.hist = append(m.hist, text)
@@ -2816,11 +2858,27 @@ func (m *model) wireTasks() {
 		}); err != nil {
 			config.LogEvent("session.task", "save failed: "+err.Error())
 		}
+		// Persist the subagent's full transcript as its own attributed session
+		// (id <parent>/task/<id>) once it settles — start rows carry no
+		// transcript yet, so only settled tasks with a live sub have one.
+		// Attribute it to the sub's own route (t.SubModel): a model-overridden
+		// subagent must not be recorded under the parent's model/provider.
+		if t.Status != agent.TaskRunning && t.SubMessages != nil {
+			if _, err := st.SaveSubagentTranscript(sessionID, t.ID, t.SubMessages, t.SubModel, ""); err != nil {
+				config.LogEvent("session.task", "transcript save failed: "+err.Error())
+			}
+		}
 	}
 	m.agent.Tasks().SetSessionID(m.sessionID)
 	m.agent.SetSessionID(m.sessionID)
+	m.wireWaits()
 	if m.prog == nil {
 		return // headless (tests)
+	}
+	m.agent.OnOrphanedSteer = func(text string) {
+		// Detached: runs on the wait-poller goroutine; a backed-up UI queue
+		// must never stall the agent (same posture as OnChange below).
+		go m.prog.Send(orphanSteerMsg(text))
 	}
 	m.agent.Tasks().OnChange = func(*agent.BackgroundTask) {
 		// Detached: OnChange runs on the subagent worker goroutine, and a
@@ -2832,6 +2890,20 @@ func (m *model) wireTasks() {
 	// specific agent, precisely so this handoff works.
 	if m.mcpMgr != nil {
 		m.agent.SetMCPTools(m.mcpMgr.Tools())
+	}
+}
+
+// wireWaits points the active agent's wait registry at this UI's wake hook:
+// an idle wait firing submits a machine-authored turn (the opencode/exo
+// pattern — whip's Steer only reaches a RUNNING turn, so idle delivery needs
+// the wake). Called from wireTasks so every agent swap re-installs it. The
+// hook runs on the wait's poller goroutine, so it only sends a message.
+func (m *model) wireWaits() {
+	if m.prog == nil {
+		return // headless (tests)
+	}
+	m.agent.Waits().OnWake = func(text string) {
+		go m.prog.Send(waitWakeMsg(text)) // detached, same rule as OnChange
 	}
 }
 
@@ -3291,10 +3363,13 @@ func (m *model) submitTurn(text string, authored bool) (tea.Model, tea.Cmd) {
 		}
 	}
 	m.discardFuture() // new activity while rewound kills the redo stack
-	// settled subagents already reported into the transcript; clear them off
-	// the dock strip so a new turn starts with only what's still running —
-	// except a task whose chat pane is open (its retained subagent is in use)
-	if m.agent != nil {
+	// Settled subagents stay in the dock until the user sends a new message, so
+	// they can review a finished subagent's transcript before moving on. A
+	// user-typed (authored) turn sweeps them; machine turns (steered reports,
+	// wake turns) don't, or a settling background task would clear its own row
+	// before the user ever saw it. A task whose chat pane is open is kept (its
+	// retained subagent is in use).
+	if authored && m.agent != nil {
 		var keep []string
 		if m.taskVP != nil {
 			keep = append(keep, m.taskVP.id)
@@ -3308,7 +3383,7 @@ func (m *model) submitTurn(text string, authored bool) (tea.Model, tea.Cmd) {
 	// callbacks drop their messages instead of panicking on a nil program
 	send := func(msg tea.Msg) {
 		if p != nil {
-			p.Send(msg)
+			p.Send(msg) //nolint:uilock // background: send runs on the agent Turn goroutine (go func at the caller)
 		}
 	}
 
@@ -3829,10 +3904,28 @@ func (m *model) currentView() string {
 // viewTop = min(viewTop, height - viewH). A resize resets the sentinel
 // (WindowSizeMsg handler) and the next render re-anchors to the bottom.
 func (m *model) View() string {
+	m.syncInputPlaceholder()
 	v := m.viewBody()
 	if m.height > 0 {
 		m.viewH = lipgloss.Height(v)
 		m.viewTop = max(min(m.viewTop, m.height-m.viewH), 0)
+	}
+	// Record the input box's absolute screen rows for drag-select. The input is
+	// hidden during interactive bash (iactive), so there's nothing to select.
+	if m.iactive != nil || m.height == 0 {
+		m.inputTop = -1
+		m.inputLines = nil
+	} else {
+		m.inputTop = m.viewTop + m.inputBodyOff
+		iv := m.input.View()
+		if m.namePrompt != nil && m.namePrompt.mask {
+			iv = m.namePrompt.label + " ┃ " + m.namePrompt.maskedValue(m.input.Value())
+		}
+		raw := strings.Split(iv, "\n")
+		m.inputLines = make([]string, len(raw))
+		for i, ln := range raw {
+			m.inputLines[i] = strings.TrimRight(ansi.Strip(ln), " \t")
+		}
 	}
 	return v
 }
@@ -3934,6 +4027,9 @@ func (m *model) viewBody() string {
 	if m.rew != nil {
 		b.WriteString(m.rewindView() + "\n\n")
 	}
+	// Record where the input box starts (line offset within this viewBody) so
+	// View can convert it to an absolute screen row for drag-select hit-testing.
+	m.inputBodyOff = strings.Count(b.String(), "\n")
 	if m.iactive == nil {
 		if m.namePrompt != nil {
 			b.WriteString(m.namePrompt.label + " ")
@@ -3941,12 +4037,12 @@ func (m *model) viewBody() string {
 				// Secrets never echo: render the mask instead of the input's
 				// live view (which would show the key in the clear). The "┃ "
 				// prompt matches how the textarea renders its own first line.
-				b.WriteString("┃ " + m.namePrompt.maskedValue(m.input.Value()))
+				b.WriteString(m.highlightInput("┃ " + m.namePrompt.maskedValue(m.input.Value())))
 			} else {
-				b.WriteString(m.input.View())
+				b.WriteString(m.highlightInput(m.input.View()))
 			}
 		} else {
-			b.WriteString(m.input.View())
+			b.WriteString(m.highlightInput(m.input.View()))
 		}
 	}
 	if m.quit1 {
@@ -3968,6 +4064,28 @@ func (m *model) viewBody() string {
 	}
 	b.WriteString("\n\n" + m.statusView()) // persistent status line, with a blank line above
 	return b.String()
+}
+
+// inputPlaceholder is the idle input hint; syncInputPlaceholder re-uses it
+// when the busy state clears so the two sites never drift.
+const inputPlaceholder = "Ask whip anything… (/ for commands, tab completes)"
+
+// syncInputPlaceholder reflects the busy state into the input's placeholder:
+// while a turn runs, typing either steers into it (when the agent is only
+// waiting on subagents) or queues behind it. Called from View so it tracks
+// the state every render. headless-safe.
+func (m *model) syncInputPlaceholder() {
+	if m.input.Value() != "" {
+		return // placeholder is hidden once the user is typing
+	}
+	switch {
+	case !m.busy:
+		m.input.Placeholder = inputPlaceholder
+	case m.agent != nil && m.agent.WaitingOnSubagents():
+		m.input.Placeholder = "waiting on subagents — type to steer this turn"
+	default:
+		m.input.Placeholder = "busy — type to queue (sent when the turn ends)"
+	}
 }
 
 // statusView renders the always-on status line below the input: current
