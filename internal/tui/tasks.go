@@ -24,6 +24,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/context-labs/whip/internal/agent"
+	"github.com/context-labs/whip/internal/llm"
 )
 
 // taskEventMsg is one live event from an opened background task (OnText /
@@ -50,6 +51,36 @@ func sendTaskMsg(p *tea.Program, msg taskEventMsg) {
 	go p.Send(msg)
 }
 
+// renderTaskEvent writes one task event to the transcript buffer. Shared by
+// the live stream (taskEventMsg in tui.go) and the journal replay in
+// openTask, so replayed history and live events can never drift in format.
+// Kind 4 (follow-up settled) only ever arrives live, never from the journal.
+func renderTaskEvent(buf *strings.Builder, kind int, s, s2 string) {
+	switch kind {
+	case 0: // text delta
+		buf.WriteString(s)
+	case 1: // tool start
+		fmt.Fprintf(buf, "\n%s %s %s\n", toolStyle.Render("⚒"), s, dimStyle.Render(s2))
+	case 2: // tool end
+		preview := strings.Split(strings.TrimRight(s2, "\n"), "\n")
+		if len(preview) > 4 {
+			preview = append(preview[:4], fmt.Sprintf("… +%d lines", len(s2)-4))
+		}
+		fmt.Fprintf(buf, "%s\n", dimStyle.Render("  "+strings.Join(preview, "\n  ")))
+	case 3: // a steered message reached the running subagent (task_steer /
+		// chat). Render it as a user message — the steering main agent (or the
+		// human in the task chat) is the subagent's orchestrator, acting as its
+		// user, so the transcript reads like a normal user turn.
+		fmt.Fprintf(buf, "\n%s %s\n", youStyle.Render("you:"), s)
+	case 4: // follow-up turn settled
+		if s != "" {
+			fmt.Fprintf(buf, "\n%s\n", errStyle.Render(s))
+		} else {
+			buf.WriteString("\n")
+		}
+	}
+}
+
 // taskView is the open per-task pane: the live transcript of one background
 // subagent (or its stored report once settled), plus a chat input — a task IS
 // a session: while it runs, typing steers it; once it settles, typing runs
@@ -70,14 +101,10 @@ type taskView struct {
 // occupies (hint row + task rows); the strip scrolls if there are more tasks.
 const tasksDockHeight = 6
 
-// dockSettledGrace is how long a settled task stays in the dock after
-// finishing — long enough to notice the ✓ and open the report, then the
-// strip cleans itself. Restored tasks (--resume history) never show: their
-// subagents died with the previous process. /tasks lists everything.
-const dockSettledGrace = time.Minute
-
-// dockTasks returns the dock's tasks — running ones plus those settled
-// within dockSettledGrace, never restored ones — newest first. Bare test
+// dockTasks returns the dock's tasks — running ones plus settled ones,
+// never restored ones — newest first. Settled tasks stay in the dock until
+// the user sends a new message (submitTurn sweeps them then), so the user
+// can review a finished subagent's transcript before moving on. Bare test
 // models have no agent; the dock is simply empty.
 func (m *model) dockTasks() []agent.BackgroundTask {
 	if m.agent == nil {
@@ -88,10 +115,7 @@ func (m *model) dockTasks() []agent.BackgroundTask {
 		if t.Restored {
 			continue // resume history belongs in /tasks, not the dock
 		}
-		// running always shows; zero EndedAt (never settled) sorts with them
-		if t.Status == agent.TaskRunning || time.Since(t.EndedAt) < dockSettledGrace {
-			out = append(out, t)
-		}
+		out = append(out, t)
 	}
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
@@ -163,14 +187,16 @@ func (m *model) tasksDock() string {
 }
 
 // openTask opens the detail view for one task: a scrollback pane seeded with
-// the prompt, then the live event stream while the task runs, or the stored
-// report once it has settled.
+// the prompt, then the journaled transcript replayed up to now, then the
+// live event stream while the task runs (or the stored report once it has
+// settled). The replay+subscribe is one atomic registry call, so no event
+// landing mid-open is missed or shown twice.
 func (m *model) openTask(id string) {
 	t, ok := m.agent.Tasks().Get(id)
 	if !ok {
 		return
 	}
-	tv := &taskView{id: id, live: t.Status == agent.TaskRunning}
+	tv := &taskView{id: id}
 	tv.input = textinput.New()
 	tv.input.Prompt = youStyle.Render("› ")
 	tv.input.Placeholder = "message this subagent (enter to send)"
@@ -178,28 +204,79 @@ func (m *model) openTask(id string) {
 	fmt.Fprintf(&tv.buf, "%s %s  %s\n\n%s %s\n",
 		toolStyle.Render("⚙"), t.ID, t.Description,
 		youStyle.Render("prompt:"), t.Prompt)
-	if t.Status == agent.TaskRunning {
+	p := m.prog
+	events, truncated, live := m.agent.Tasks().SubscribeWithJournal(id, agent.Events{
+		OnText: func(s string) {
+			sendTaskMsg(p, taskEventMsg{id: id, kind: 0, s: s})
+		},
+		OnToolStart: func(_, n, a string) {
+			sendTaskMsg(p, taskEventMsg{id: id, kind: 1, s: n, s2: a})
+		},
+		OnToolEnd: func(_, n, r string) {
+			sendTaskMsg(p, taskEventMsg{id: id, kind: 2, s: n, s2: r})
+		},
+		OnSteer: func(s string) {
+			sendTaskMsg(p, taskEventMsg{id: id, kind: 3, s: s})
+		},
+	})
+	tv.live = live
+	if truncated {
+		fmt.Fprintf(&tv.buf, "\n%s\n", dimStyle.Render("  [earlier output dropped]"))
+	}
+	for _, e := range events {
+		renderTaskEvent(&tv.buf, e.Kind, e.S, e.S2)
+	}
+	switch {
+	case live:
+		if len(events) > 0 {
+			tv.buf.WriteString("\n")
+		}
 		fmt.Fprintf(&tv.buf, "\n%s\n", dimStyle.Render("  running…"))
-		p := m.prog
-		m.agent.Tasks().Subscribe(id, agent.Events{
-			OnText: func(s string) {
-				sendTaskMsg(p, taskEventMsg{id: id, kind: 0, s: s})
-			},
-			OnToolStart: func(_, n, a string) {
-				sendTaskMsg(p, taskEventMsg{id: id, kind: 1, s: n, s2: a})
-			},
-			OnToolEnd: func(_, n, r string) {
-				sendTaskMsg(p, taskEventMsg{id: id, kind: 2, s: n, s2: r})
-			},
-			OnSteer: func(s string) {
-				sendTaskMsg(p, taskEventMsg{id: id, kind: 3, s: s})
-			},
-		})
-	} else {
+	case len(events) > 0:
+		// Settled with a journal: the replay above already shows the work;
+		// close it out with the final status line.
+		fmt.Fprintf(&tv.buf, "\n%s %s\n", toolStyle.Render(string(t.Status)+":"), t.Report)
+	case t.Restored && m.store != nil:
+		// A restored task's subagent died with the last process, so there's no
+		// live stream and no journal — but its transcript persisted. Replay it
+		// read-only so the view shows the completed work, not just the report.
+		if msgs, err := m.store.SubagentTranscript(m.sessionID, t.ID); err == nil && len(msgs) > 0 {
+			renderTranscript(&tv.buf, msgs)
+		} else {
+			fmt.Fprintf(&tv.buf, "\n%s %s\n", toolStyle.Render(string(t.Status)+":"), t.Report)
+		}
+	default:
 		fmt.Fprintf(&tv.buf, "\n%s %s\n", toolStyle.Render(string(t.Status)+":"), t.Report)
 	}
 	m.taskVP = tv
 	m.refreshTaskVP()
+}
+
+// renderTranscript writes a persisted conversation as role-labeled blocks for
+// the restored-task detail view (read-only history). Tool calls show as their
+// name; the system prompt is skipped.
+func renderTranscript(buf *strings.Builder, msgs []llm.Message) {
+	for _, msg := range msgs {
+		switch msg.Role {
+		case "system":
+			continue
+		case "user":
+			fmt.Fprintf(buf, "\n%s %s\n", youStyle.Render("you:"), msg.Content)
+		case "assistant":
+			if msg.Content != "" {
+				fmt.Fprintf(buf, "\n%s\n", msg.Content)
+			}
+			for _, tc := range msg.ToolCalls {
+				fmt.Fprintf(buf, "\n%s %s %s\n", toolStyle.Render("⚒"), tc.Function.Name, dimStyle.Render(tc.Function.Arguments))
+			}
+		case "tool":
+			preview := strings.Split(strings.TrimRight(msg.Content, "\n"), "\n")
+			if len(preview) > 4 {
+				preview = append(preview[:4], fmt.Sprintf("… +%d lines", len(msg.Content)-4))
+			}
+			fmt.Fprintf(buf, "%s\n", dimStyle.Render("  "+strings.Join(preview, "\n  ")))
+		}
+	}
 }
 
 // taskChatable reports whether the open task can receive messages: restored
@@ -223,7 +300,7 @@ func (m *model) taskSend(tv *taskView, text string) {
 			fmt.Fprintf(&tv.buf, "\n%s\n", errStyle.Render(err.Error()))
 			break
 		}
-		fmt.Fprintf(&tv.buf, "\n%s %s\n", youStyle.Render("you (steer):"), text)
+		fmt.Fprintf(&tv.buf, "\n%s %s\n", youStyle.Render("you:"), text)
 	case tv.busy:
 		fmt.Fprintf(&tv.buf, "\n%s\n", dimStyle.Render("(still replying — wait for the current reply)"))
 	default:

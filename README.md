@@ -66,6 +66,12 @@ install script above.
 Drop a `.mcp.json` in your repo and MCP servers just appear (`/mcp` to see
 them). ctrl+c once interrupts; twice quits.
 
+## Themes
+
+Set `"theme": "dark"`, `"light"`, or a custom theme name in
+`~/.whip/config.json`. Custom JSONC themes live in
+`~/.whip/themes/<name>.json` and appear in `/theme`.
+
 ## Docs
 
 The full setup, config reference, MCP, browser/computer-use, and how

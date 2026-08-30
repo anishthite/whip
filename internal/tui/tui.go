@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ import (
 	"github.com/context-labs/whip/internal/memory"
 	"github.com/context-labs/whip/internal/session"
 	"github.com/context-labs/whip/internal/skills"
+	"github.com/context-labs/whip/internal/theme"
 	"github.com/context-labs/whip/internal/tools"
 	"github.com/context-labs/whip/internal/tools/bashrun"
 	"github.com/context-labs/whip/internal/update"
@@ -39,8 +41,9 @@ import (
 	"github.com/muesli/termenv"
 )
 
-// UI styles use AdaptiveColor so they stay legible on both dark and light
-// terminal backgrounds (detected at startup by detectColorScheme).
+// UI styles are package vars so a theme switch can swap them live. The agent
+// goroutines only send messages; rendering and setTheme both run in Update/View,
+// so swapping these remains race-clean.
 var (
 	youStyle  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "21", Dark: "12"}).Bold(true) // blue
 	botStyle  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "90", Dark: "13"}).Bold(true) // purple/magenta
@@ -52,6 +55,110 @@ var (
 	// visually distinct from the answer.
 	thinkingStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "240", Dark: "245"}).Italic(true)
 )
+
+func syncStyles(s theme.StyleSet) {
+	youStyle, botStyle, toolStyle = s.You, s.Bot, s.Tool
+	dimStyle, errStyle, thinkingStyle = s.Dim, s.Error, s.Thinking
+}
+
+// syncMarkdown drives the TUI's own glamour markdown cache (renderMarkdown
+// in markdown.go) from the theme's resolved background, instead of calling
+// SetLightTheme/SetUnknownTheme directly from each setTheme branch. When
+// determined is false the background couldn't be read (auto, no signal) and
+// markdown renders in the neutral default style.
+func syncMarkdown(s theme.StyleSet) {
+	if !s.Determined {
+		SetUnknownTheme()
+		return
+	}
+	SetLightTheme(s.Bg == theme.BgLight)
+}
+
+// probeBackground is the single terminal-background detection implementation,
+// pure (no markdown/style side effects), returning the resolved background,
+// whether it was determined, and a short human source string for the UI note.
+// Both detectBackground (the theme.DetectFunc) and detectColorScheme (the
+// tested wrapper that also applies the TUI markdown side effects) delegate
+// here so the priority chain lives once:
+//
+//	WHIP_THEME env > COLORFGBG > OSC 11 query on /dev/tty > termenv fallback
+//	> undetermined (neutral default).
+//
+// A config "theme" of light/dark is handled before this — setTheme routes
+// those straight to theme.Apply's built-in branch — so probeBackground only
+// runs for auto.
+func probeBackground() (bg theme.Background, determined bool, source string) {
+	setResult := func(light bool, source string) (theme.Background, bool, string) {
+		return bgFromLight(light), true, source
+	}
+	switch strings.ToLower(os.Getenv("WHIP_THEME")) {
+	case "light":
+		return setResult(true, "WHIP_THEME")
+	case "dark":
+		return setResult(false, "WHIP_THEME")
+	}
+	// Never run an OSC query while Bubble Tea owns the tty: changing raw-mode
+	// settings under its input reader can produce a spurious EOF and freeze input.
+	if tuiRunning {
+		if bgCache.valid {
+			return setResult(bgCache.light, "terminal query (cached from startup)")
+		}
+		light, ok, how := fallbackScheme(inTmuxEnv(), os.Getenv("COLORFGBG"))
+		if !ok {
+			return theme.BgDark, false, how
+		}
+		return setResult(light, how)
+	}
+
+	inTmux := inTmuxEnv()
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err == nil {
+		if light, ok := queryTerminalBackground(tty, inTmux); ok {
+			_ = tty.Close()
+			bgCache = bgResult{light: light, valid: true}
+			if inTmux {
+				return setResult(light, "terminal query (inside tmux)")
+			}
+			return setResult(light, "terminal query")
+		}
+		if !inTmux {
+			type result struct{ light bool }
+			done := make(chan result, 1)
+			go func() {
+				o := termenv.NewOutput(tty)
+				done <- result{light: !o.HasDarkBackground()}
+			}()
+			select {
+			case r := <-done:
+				_ = tty.Close()
+				bgCache = bgResult{light: r.light, valid: true}
+				return setResult(r.light, "terminal query")
+			case <-time.After(300 * time.Millisecond):
+			}
+		}
+		_ = tty.Close()
+	}
+	light, ok, how := fallbackScheme(inTmux, os.Getenv("COLORFGBG"))
+	if !ok {
+		return theme.BgDark, false, how
+	}
+	return setResult(light, how)
+}
+
+func bgFromLight(light bool) theme.Background {
+	if light {
+		return theme.BgLight
+	}
+	return theme.BgDark
+}
+
+// detectBackground is the theme.DetectFunc passed to theme.Apply: the pure
+// detection half, no side effects (applyTheme drives the TUI markdown cache
+// via syncMarkdown from the resulting StyleSet).
+func detectBackground() (theme.Background, bool) {
+	bg, determined, _ := probeBackground()
+	return bg, determined
+}
 
 // messages sent from the agent goroutine
 type (
@@ -87,14 +194,16 @@ type turnDoneMsg struct {
 	clean bool   // the turn left the tree clean — snap is worthless, drop it
 }
 type (
-	catalogsMsg   map[string]config.Catalog // background /models fetch result
-	noticeMsg     string                    // dim one-liner appended to the transcript
-	usageMsg      llm.Usage                 // one request's token usage
-	quitArmMsg    struct{}                  // the idle ctrl+c arm window expired
-	taskUpdateMsg struct{}                  // a background subagent started/settled — redraw
-	mcpStatusMsg  struct{}                  // an MCP server changed state — redraw
-	thinkMsg      string                    // streamed reasoning tokens
-	imageMsg      struct {                  // ctrl+v clipboard image result
+	catalogsMsg    map[string]config.Catalog // background /models fetch result
+	noticeMsg      string                    // dim one-liner appended to the transcript
+	usageMsg       llm.Usage                 // one request's token usage
+	quitArmMsg     struct{}                  // the idle ctrl+c arm window expired
+	taskUpdateMsg  struct{}                  // a background subagent started/settled — redraw
+	waitWakeMsg    string                    // an idle wait fired — wake as a machine turn
+	orphanSteerMsg string                    // a steer orphaned at turn teardown — submit as a machine turn
+	mcpStatusMsg   struct{}                  // an MCP server changed state — redraw
+	thinkMsg       string                    // streamed reasoning tokens
+	imageMsg       struct {                  // ctrl+v clipboard image result
 		path string // clipboard image saved to disk
 		err  error
 	}
@@ -178,15 +287,22 @@ type model struct {
 
 	pendingForkID string // busy-forked copy awaiting the turn's end to switch into ("" = none)
 
-	mouseOn      bool       // runtime mouse-capture state (toggle with /mouse)
-	sel          *selection // in-flight/last drag selection over the transcript
-	selDragX     int        // last drag pointer position (edge auto-scroll re-checks it)
-	selDragY     int
-	vpLead       int    // top blank rows viewportView last dropped (selection row mapping)
-	viewTop      int    // screen row of the view's first line (View tracks it; mouse Y is absolute)
-	viewH        int    // height of the last rendered view
-	themeHow     string // how auto theme detection resolved (env var, OSC query, …) — captured at startup/theme change for /report; never re-queried
-	compactModel string // config model name for compaction summaries; "" = the built-in default
+	mouseOn  bool       // runtime mouse-capture state (toggle with /mouse)
+	sel      *selection // in-flight/last drag selection over the transcript
+	selDragX int        // last drag pointer position (edge auto-scroll re-checks it)
+	selDragY int
+	// Input box selection tracking: View records the input's absolute screen
+	// rows so drag-select can hit-test/extract/highlight it. inputBodyOff is
+	// the line offset within viewBody where the input starts; inputTop is the
+	// absolute screen row (viewTop + inputBodyOff), -1 when hidden.
+	inputBodyOff int
+	inputTop     int
+	inputLines   []string // the input box's rendered lines, ANSI-stripped
+	vpLead       int      // top blank rows viewportView last dropped (selection row mapping)
+	viewTop      int      // screen row of the view's first line (View tracks it; mouse Y is absolute)
+	viewH        int      // height of the last rendered view
+	themeHow     string   // how auto theme detection resolved (env var, OSC query, …) — captured at startup/theme change for /report; never re-queried
+	compactModel string   // config model name for compaction summaries; "" = the built-in default
 	compactProv  string
 	// updateLatest is a pending newer release tag ("" when none), picked up
 	// from update.Pending at startup; the notice it renders is durable, so a
@@ -238,7 +354,7 @@ type picker struct {
 // Newlines come from ctrl+j / shift+enter / alt+enter; plain enter submits.
 func newInput() textarea.Model {
 	ti := textarea.New()
-	ti.Placeholder = "Ask whip anything… (/ for commands, tab completes)"
+	ti.Placeholder = inputPlaceholder
 	ti.Prompt = "┃ "
 	ti.SetHeight(1)
 	ti.MaxHeight = 24 // input grows with content up to this many lines
@@ -276,15 +392,31 @@ var (
 )
 
 // Run starts the interactive session. It returns the id of the session that
-// was active on exit ("" if nothing was said).
-func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string, cautious bool) (string, error) {
+// was active on exit ("" if nothing was said). firstRun reports the config
+// file did not exist at startup (the caller checks config.Exists before
+// config.Load creates it) and triggers the one-time setup wizard.
+func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string, cautious, firstRun bool) (string, error) {
+	// One shared stdin reader for the pre-TUI prompts: a bufio.Reader reads
+	// ahead, so separate readers for the trust gate and the setup wizard would
+	// lose buffered answers (a pasted "y\n2\n…\n" answers both).
+	stdinR := bufio.NewReader(os.Stdin)
+
 	// Trust gate first: before whip reads a single file, ask whether this
 	// folder's contents may steer the model. Persisted per absolute path in
 	// ~/.whip/trusted.json (claude-code's per-project trust dialog).
-	if ok, err := checkTrust(); err != nil {
+	if ok, err := checkTrust(stdinR); err != nil {
 		return "", err
 	} else if !ok {
 		return "", errors.New("folder not trusted")
+	}
+
+	// First run only: the setup wizard (provider, thinking display, MCP
+	// imports) before the TUI takes the terminal. Skipped silently when stdin
+	// isn't a terminal — headless launches keep the defaults.
+	if firstRun {
+		if err := setupWizard(cfg, stdinR); err != nil {
+			return "", err
+		}
 	}
 
 	ag, mn, pn, err := buildAgentWithRefresh(cfg, modelName, provName, sysPrompt)
@@ -340,17 +472,7 @@ func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string, ca
 		if len(merged) > 0 || len(disc.Blocked) > 0 || len(mcpErrs) > 0 {
 			m.mcpMgr = mcp.NewManager(merged)
 			m.mcpMgr.SetBlocked(disc.Blocked)
-			// MCP connects settle in the background; push each new tool set
-			// into the CURRENT agent (mutex-guarded on the agent side) so
-			// servers that connect after turn 1 show up without a restart.
-			// The closure reads m.agent at call time: resume/model-switch
-			// replace the agent, and wireTasks re-points the manager at it.
-			m.mcpMgr.SetOnChange(func() {
-				m.agent.SetMCPTools(m.mcpMgr.Tools())
-				if m.prog != nil { // nil in headless tests
-					m.prog.Send(mcpStatusMsg{})
-				}
-			})
+			m.mcpMgr.SetOnChange(m.mcpOnChange())
 			m.mcpMgr.Start(context.Background())
 			ag.SetMCPTools(m.mcpMgr.Tools())
 			for src, derr := range mcpErrs {
@@ -429,8 +551,9 @@ func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string, ca
 	if m.mouseOn {
 		enableClickWheelMouse(os.Stdout)
 	}
-	// pick the glamour style that matches the pick/detection resolution;
-	// keep how detection resolved so /report can name the source
+	// Load user themes before applying the persisted selection. Keep how auto
+	// detection resolved so /report can name the source.
+	m.loadThemes()
 	m.themeHow = m.applyTheme(cfg.Theme)
 	if m.cfgExtra == nil {
 		m.cfgExtra = map[string]string{}
@@ -629,7 +752,7 @@ func refreshCatalogs(cfg *config.Config, force bool) map[string]config.Catalog {
 func (m *model) fetchCatalogs(force bool) {
 	cats := refreshCatalogs(m.cfg, force)
 	if m.prog != nil { // nil in tests that drive the command dispatch directly
-		m.prog.Send(catalogsMsg(cats))
+		m.prog.Send(catalogsMsg(cats)) //nolint:uilock // background: fetchCatalogs is always `go`-launched
 	}
 }
 
@@ -872,60 +995,73 @@ func (m *model) persist() {
 	m.saved = len(m.agent.Messages)
 }
 
-// setTheme switches the color scheme ("light"/"dark"/"auto") live and
-// persists the pick to the global config: markdown re-renders under the new
-// glamour style and every AdaptiveColor UI style follows lipgloss. A theme
-// file change in ANOTHER running whip session is picked up live via
-// syncThemeMsg.
-func (m *model) setTheme(theme string) {
-	if theme != "light" && theme != "dark" {
-		theme = "auto"
+// setTheme switches the active theme live and persists it. Built-ins and user
+// themes share the same apply path; auto persists as "" like before.
+func (m *model) setTheme(name string) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	m.loadThemes()
+	if _, ok := theme.Find(theme.All(), name); !ok {
+		name = "auto"
 	}
-	how := m.applyTheme(theme)
+	how := m.applyTheme(name)
 	m.themeHow = how // explicit picks return "" — detection source no longer applies
-	m.cfg.Theme = theme
-	if theme == "auto" {
+	m.cfg.Theme = name
+	if name == "auto" {
 		m.cfg.Theme = "" // auto persists as "" (omitted = auto-detect)
 	}
 	if m.cfgExtra == nil {
 		m.cfgExtra = map[string]string{}
 	}
-	if theme == "auto" {
-		delete(m.cfgExtra, "theme") // explicit pick, not omission
+	if name == "auto" {
+		delete(m.cfgExtra, "theme")
 	} else {
-		m.cfgExtra["theme"] = theme
+		m.cfgExtra["theme"] = name
 	}
 	if err := m.cfg.Save(); err != nil {
 		m.append(errStyle.Render("config save failed: " + err.Error()))
 	}
-	m.refreshVP() // re-render the transcript under the new scheme
-	if theme == "auto" {
+	m.refreshVP()
+	if name == "auto" {
 		m.append(dimStyle.Render(fmt.Sprintf("◐ theme: %s (auto: %s)", CurrentTheme(), how)))
-	} else {
-		m.append(dimStyle.Render("◐ theme: " + CurrentTheme()))
+		return
 	}
+	m.append(dimStyle.Render("◐ theme: " + theme.Active()))
 }
 
-// applyTheme points rendering at a scheme WITHOUT persisting: auto re-detects
-// (re-reading the terminal background so switching dark→auto can't stay dark),
-// explicit picks override detection directly. Called by setTheme, startup, and
-// the config watcher. how (only meaningful for auto) names the detection
-// source so a wrong pick is diagnosable in the transcript note.
-func (m *model) applyTheme(theme string) (how string) {
-	switch theme {
-	case "light":
-		SetLightTheme(true)
-		lipgloss.SetHasDarkBackground(false)
-		setSchemeOverride("light")
-	case "dark":
-		SetLightTheme(false)
-		lipgloss.SetHasDarkBackground(true)
-		setSchemeOverride("dark")
-	default: // auto: don't touch m.cfg.Theme — setTheme owns persistence
+// applyTheme points rendering at a scheme without persisting. The config
+// watcher calls this for changes made by another Whip session.
+func (m *model) applyTheme(name string) (how string) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || name == "auto" {
 		setSchemeOverride("")
-		how = detectColorScheme()
+		bg, determined, source := probeBackground()
+		theme.ApplyAuto(bg, determined)
+		how = source
+	} else {
+		how = theme.Apply(name, detectBackground)
+		if name == "light" || name == "dark" {
+			setSchemeOverride(name)
+		} else {
+			setSchemeOverride("")
+		}
 	}
+	s := theme.Styles()
+	syncStyles(s)
+	m.input.FocusedStyle.Placeholder = dimStyle
+	m.input.BlurredStyle.Placeholder = dimStyle
+	m.input.FocusedStyle.Prompt = botStyle
+	m.input.BlurredStyle.Prompt = dimStyle
+	syncMarkdown(s)
 	return how
+}
+
+// loadThemes refreshes the user theme cache before an apply or picker read.
+// A bad themes directory never blocks the TUI: built-ins remain available and
+// the error is visible in the transcript.
+func (m *model) loadThemes() {
+	if _, err := theme.Load(); err != nil {
+		m.append(errStyle.Render("theme load failed: " + err.Error()))
+	}
 }
 
 // setEffort changes the reasoning effort and stores it both ways: as the new
@@ -1336,128 +1472,23 @@ func cwd() string {
 	return "?"
 }
 
-// detectColorScheme figures out whether the terminal background is light and
-// calls SetLightTheme so markdown renders with a matching (high-contrast)
-// glamour style. Priority:
-//  1. WHIP_THEME=light|dark (explicit env override)
-//  2. COLORFGBG (set by many terminals; last field is the bg color index)
-//  3. an OSC 11 background query on /dev/tty with a short timeout
-//  4. default: dark (the safe assumption for coding terminals)
-//
-// The config theme is NOT consulted here — applyTheme handles explicit picks
-// before auto ever reaches detection. detectColorScheme returns a short
-// human-readable note naming the source of the decision (shown by /theme auto
-// so a wrong pick is diagnosable).
-//
-// tuiRunning and bgCache are declared above Run (see the note there).
+// bgResult caches the pre-Bubble Tea terminal probe. It is only read and
+// written by the main goroutine: once before p.Run, then from the update loop.
 type bgResult struct{ light, valid bool }
 
-// inTmuxEnv reports whether whip runs inside tmux/screen, where the terminal
-// can't be queried directly.
 func inTmuxEnv() bool {
 	return os.Getenv("TMUX") != "" ||
 		strings.HasPrefix(os.Getenv("TERM"), "screen") ||
 		strings.HasPrefix(os.Getenv("TERM"), "tmux")
 }
 
-func detectColorScheme() string {
-	setScheme := func(light bool) {
-		SetLightTheme(light)                  // glamour markdown style
-		lipgloss.SetHasDarkBackground(!light) // AdaptiveColor picks
-	}
-	switch strings.ToLower(os.Getenv("WHIP_THEME")) {
-	case "light":
-		setScheme(true)
-		return "WHIP_THEME"
-	case "dark":
-		setScheme(false)
-		return "WHIP_THEME"
-	}
-	// While bubbletea runs, the terminal is OFF LIMITS: the raw-mode OSC 11
-	// query flips the shared tty to VMIN=0/VTIME, and if bubbletea's input
-	// reader issues a read in that window it gets a 0-byte result = io.EOF —
-	// the reader exits SILENTLY and the session never sees input again (the
-	// frozen-whip bug: /theme auto or a config-watcher sync re-ran detection
-	// mid-session). Reuse the startup query's answer instead; env fallbacks
-	// below are read-only and stay available.
-	if tuiRunning {
-		if bgCache.valid {
-			setScheme(bgCache.light)
-			return "terminal query (cached from startup)"
-		}
-		light, ok, how := fallbackScheme(inTmuxEnv(), os.Getenv("COLORFGBG"))
-		if ok {
-			setScheme(light)
-		} else {
-			SetUnknownTheme()
-		}
-		return how
-	}
-	// Query the terminal directly whenever we have one — the OSC 11 reply is
-	// the terminal's REAL background, so it outranks COLORFGBG (which can be
-	// stale: inherited from an outer shell/terminal with a different bg).
-	// termenv's query refuses to run inside tmux/screen (its termStatusReport
-	// short-circuits on TERM=screen*/tmux*) and silently assumes a dark
-	// background — wrong for a tmux user on a light terminal. queryTerminal-
-	// Background reaches the REAL terminal via DCS passthrough inside tmux, and
-	// via a plain OSC 11 query otherwise, so use it first and keep termenv only
-	// as a fallback for terminals it can query directly.
-	inTmux := inTmuxEnv()
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err == nil {
-		if light, ok := queryTerminalBackground(tty, inTmux); ok {
-			_ = tty.Close()
-			setScheme(light)
-			bgCache = bgResult{light: light, valid: true}
-			if inTmux {
-				return "terminal query (inside tmux)"
-			}
-			return "terminal query"
-		}
-		// fallback: termenv's own query — but NEVER inside tmux/screen, where
-		// termenv can't reach the real terminal (its termStatusReport
-		// short-circuits on TERM=screen*/tmux*) and silently ASSUMES DARK.
-		// That guess rendered the dark palette on light terminals (washed-out
-		// gray text on white) whenever the tmux query got no reply.
-		if !inTmux {
-			type result struct{ light bool }
-			done := make(chan result, 1)
-			go func() {
-				o := termenv.NewOutput(tty)
-				done <- result{light: !o.HasDarkBackground()}
-			}()
-			select {
-			case r := <-done:
-				_ = tty.Close()
-				setScheme(r.light)
-				bgCache = bgResult{light: r.light, valid: true}
-				return "terminal query"
-			case <-time.After(300 * time.Millisecond):
-			}
-		}
-		_ = tty.Close()
-	}
-	light, ok, how := fallbackScheme(inTmux, os.Getenv("COLORFGBG"))
-	if ok {
-		setScheme(light)
-	} else {
-		// No reliable signal: don't force a dark guess. Neutral default keeps
-		// text at the terminal's own colors instead of inverting contrast.
-		SetUnknownTheme()
-	}
-	return how
-}
-
-// fallbackScheme decides the color scheme when no terminal query succeeded:
-// COLORFGBG (set by many terminals; last field is the bg color index) when
-// parseable, otherwise not-ok — the caller falls back to the neutral theme.
-// Pure so the no-query-reply behavior is unit-testable: inside tmux the ONLY
-// acceptable outcomes are COLORFGBG or neutral, never a dark assumption.
+// fallbackScheme reads COLORFGBG after an unsuccessful query. In tmux, no
+// signal remains neutral rather than assuming dark because termenv cannot
+// reliably query the outer terminal there.
 func fallbackScheme(inTmux bool, colorfgbg string) (light, ok bool, how string) {
 	if i := strings.LastIndex(colorfgbg, ";"); i >= 0 {
 		var bg int
 		if _, err := fmt.Sscanf(colorfgbg[i+1:], "%d", &bg); err == nil {
-			// standard palette: 0-6 dark, 7+ light (15 = white)
 			return bg == 7 || bg >= 8, true, "COLORFGBG (query failed)"
 		}
 	}
@@ -1465,6 +1496,20 @@ func fallbackScheme(inTmux bool, colorfgbg string) (light, ok bool, how string) 
 		return false, false, "undetermined (no OSC 11 reply through tmux — outer terminal doesn't answer it (e.g. mosh), or tmux <3.4 without `allow-passthrough on`) — neutral default"
 	}
 	return false, false, "undetermined (query timed out) — neutral default"
+}
+
+// detectColorScheme applies the detected terminal background to the legacy
+// markdown renderer and returns the source for diagnostics. Theme application
+// itself uses applyTheme; this remains a small testable compatibility wrapper.
+func detectColorScheme() string {
+	bg, determined, source := probeBackground()
+	if !determined {
+		SetUnknownTheme()
+		return source
+	}
+	SetLightTheme(bg == theme.BgLight)
+	lipgloss.SetHasDarkBackground(bg == theme.BgDark)
+	return source
 }
 
 // inputContentHeight returns the number of lines the input needs to show its
@@ -2109,12 +2154,44 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case orphanSteerMsg:
+		// A steer arrived after the drain snapshot at turn teardown and was
+		// orphaned. The agent can't message the TUI itself (same seam as
+		// waitWakeMsg) — it surfaced the steer through OnOrphanedSteer; run it
+		// as a machine turn so the steer is never lost.
+		if !m.busy {
+			return m.submitTurn(string(msg), true)
+		}
+		return m, nil
+
+	case waitWakeMsg:
+		// An idle wait fired: wake as a machine-authored turn (the opencode/
+		// exo wake pattern). If a turn started between the wait's TurnRunning
+		// check and this message, steer into the live turn instead of
+		// double-submitting — a steer parks until the next loop boundary.
+		m.append(dimStyle.Render("⏲ " + firstLine(string(msg))))
+		if m.busy {
+			m.agent.Steer(string(msg))
+			return m, nil
+		}
+		return m.submitTurn(string(msg), false)
+
 	case mcpStatusMsg:
 		// An MCP server changed state. Announce each server's FIRST settle in
 		// the transcript (one line, once per session per server) so arrivals
 		// and failures are visible without typing /mcp — later transitions
-		// (auto-reconnect, toggles) stay quiet to avoid flapping noise.
+		// (auto-reconnect, toggles) stay quiet to avoid flapping noise. An open
+		// MCPs palette panel rebuilds its rows so a background settle ("◌
+		// connecting…" → "● N tools") shows without the user re-opening it.
 		if m.mcpMgr != nil {
+			if m.palette != nil {
+				if pp := m.palette.top(); pp != nil && pp.kind == panelMCP {
+					pp.mcps = m.buildMCPRows()
+					if pp.midx >= len(pp.mcps) {
+						pp.midx = len(pp.mcps) - 1
+					}
+				}
+			}
 			if m.mcpSeen == nil {
 				m.mcpSeen = map[string]bool{}
 			}
@@ -2146,27 +2223,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if tv == nil || msg.id != tv.id {
 			return m, nil
 		}
-		switch msg.kind {
-		case 0: // text delta
-			tv.buf.WriteString(msg.s)
-		case 1: // tool start
-			fmt.Fprintf(&tv.buf, "\n%s %s %s\n", toolStyle.Render("⚒"), msg.s, dimStyle.Render(msg.s2))
-		case 2: // tool end
-			preview := strings.Split(strings.TrimRight(msg.s2, "\n"), "\n")
-			if len(preview) > 4 {
-				preview = append(preview[:4], fmt.Sprintf("… +%d lines", len(msg.s2)-4))
-			}
-			fmt.Fprintf(&tv.buf, "%s\n", dimStyle.Render("  "+strings.Join(preview, "\n  ")))
-		case 3: // a steered message reached the running subagent (task_steer / chat)
-			fmt.Fprintf(&tv.buf, "\n%s %s\n", youStyle.Render("↪ steered:"), msg.s)
-		case 4: // follow-up turn settled; unlock the chat input
+		if msg.kind == 4 { // follow-up turn settled; unlock the chat input
 			tv.busy, tv.followCancel = false, nil
-			if msg.s != "" {
-				fmt.Fprintf(&tv.buf, "\n%s\n", errStyle.Render(msg.s))
-			} else {
-				tv.buf.WriteString("\n")
-			}
 		}
+		renderTaskEvent(&tv.buf, msg.kind, msg.s, msg.s2)
 		m.refreshTaskVP()
 		return m, nil
 
@@ -2554,9 +2614,9 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.tasksFocus { // open the selected task's detail view
 			m.tasksFocus = false
-			// dockTasks is time-dependent (settled tasks age out after
-			// dockSettledGrace), so the strip can go empty — or shrink below
-			// taskSel — between the last paint and this keypress
+			// settled tasks linger in the dock until the user sends a new
+			// message, so the strip is stable between the last paint and this
+			// keypress; the list can still be empty (or smaller than taskSel)
 			if tasks := m.dockTasks(); len(tasks) > 0 {
 				m.openTask(tasks[min(m.taskSel, len(tasks)-1)].ID)
 			}
@@ -2586,6 +2646,17 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.input.Reset()
 				m.menu = nil
 				m.runShell(text)
+			case text != "" && m.agent.WaitingOnSubagents():
+				// The turn is blocked only on subagents — steer the message in
+				// as a mid-turn correction instead of queueing it behind the
+				// whole turn (it isn't an interruption if the agent is just
+				// waiting). Echo it like a steered background-task report.
+				m.hist = append(m.hist, text)
+				m.histIdx = len(m.hist)
+				m.input.Reset()
+				m.menu = nil
+				m.agent.Steer(text)
+				m.append(youStyle.Render("❯ ") + linkifyFilePaths(text, realFileExists) + dimStyle.Render("  (steered)"))
 			case text != "": // codex-style: queue it (multiple allowed)
 				m.queue = append(m.queue, text)
 				m.hist = append(m.hist, text)
@@ -2816,11 +2887,27 @@ func (m *model) wireTasks() {
 		}); err != nil {
 			config.LogEvent("session.task", "save failed: "+err.Error())
 		}
+		// Persist the subagent's full transcript as its own attributed session
+		// (id <parent>/task/<id>) once it settles — start rows carry no
+		// transcript yet, so only settled tasks with a live sub have one.
+		// Attribute it to the sub's own route (t.SubModel): a model-overridden
+		// subagent must not be recorded under the parent's model/provider.
+		if t.Status != agent.TaskRunning && t.SubMessages != nil {
+			if _, err := st.SaveSubagentTranscript(sessionID, t.ID, t.SubMessages, t.SubModel, ""); err != nil {
+				config.LogEvent("session.task", "transcript save failed: "+err.Error())
+			}
+		}
 	}
 	m.agent.Tasks().SetSessionID(m.sessionID)
 	m.agent.SetSessionID(m.sessionID)
+	m.wireWaits()
 	if m.prog == nil {
 		return // headless (tests)
+	}
+	m.agent.OnOrphanedSteer = func(text string) {
+		// Detached: runs on the wait-poller goroutine; a backed-up UI queue
+		// must never stall the agent (same posture as OnChange below).
+		go m.prog.Send(orphanSteerMsg(text))
 	}
 	m.agent.Tasks().OnChange = func(*agent.BackgroundTask) {
 		// Detached: OnChange runs on the subagent worker goroutine, and a
@@ -2832,6 +2919,20 @@ func (m *model) wireTasks() {
 	// specific agent, precisely so this handoff works.
 	if m.mcpMgr != nil {
 		m.agent.SetMCPTools(m.mcpMgr.Tools())
+	}
+}
+
+// wireWaits points the active agent's wait registry at this UI's wake hook:
+// an idle wait firing submits a machine-authored turn (the opencode/exo
+// pattern — whip's Steer only reaches a RUNNING turn, so idle delivery needs
+// the wake). Called from wireTasks so every agent swap re-installs it. The
+// hook runs on the wait's poller goroutine, so it only sends a message.
+func (m *model) wireWaits() {
+	if m.prog == nil {
+		return // headless (tests)
+	}
+	m.agent.Waits().OnWake = func(text string) {
+		go m.prog.Send(waitWakeMsg(text)) // detached, same rule as OnChange
 	}
 }
 
@@ -3291,10 +3392,13 @@ func (m *model) submitTurn(text string, authored bool) (tea.Model, tea.Cmd) {
 		}
 	}
 	m.discardFuture() // new activity while rewound kills the redo stack
-	// settled subagents already reported into the transcript; clear them off
-	// the dock strip so a new turn starts with only what's still running —
-	// except a task whose chat pane is open (its retained subagent is in use)
-	if m.agent != nil {
+	// Settled subagents stay in the dock until the user sends a new message, so
+	// they can review a finished subagent's transcript before moving on. A
+	// user-typed (authored) turn sweeps them; machine turns (steered reports,
+	// wake turns) don't, or a settling background task would clear its own row
+	// before the user ever saw it. A task whose chat pane is open is kept (its
+	// retained subagent is in use).
+	if authored && m.agent != nil {
 		var keep []string
 		if m.taskVP != nil {
 			keep = append(keep, m.taskVP.id)
@@ -3308,7 +3412,7 @@ func (m *model) submitTurn(text string, authored bool) (tea.Model, tea.Cmd) {
 	// callbacks drop their messages instead of panicking on a nil program
 	send := func(msg tea.Msg) {
 		if p != nil {
-			p.Send(msg)
+			p.Send(msg) //nolint:uilock // background: send runs on the agent Turn goroutine (go func at the caller)
 		}
 	}
 
@@ -3532,11 +3636,12 @@ func (m *model) command(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "/theme":
 		if len(fields) > 1 {
-			switch fields[1] {
-			case "light", "dark", "auto":
-				m.setTheme(fields[1])
-			default:
-				m.append(errStyle.Render("usage: /theme light|dark|auto"))
+			m.loadThemes()
+			name := strings.ToLower(fields[1])
+			if _, ok := theme.Find(theme.All(), name); ok {
+				m.setTheme(name)
+			} else {
+				m.append(errStyle.Render("usage: /theme light|dark|auto|<name>"))
 			}
 		} else {
 			m.openPaletteOn("theme") // bare: open the switcher, don't toggle blind
@@ -3829,10 +3934,28 @@ func (m *model) currentView() string {
 // viewTop = min(viewTop, height - viewH). A resize resets the sentinel
 // (WindowSizeMsg handler) and the next render re-anchors to the bottom.
 func (m *model) View() string {
+	m.syncInputPlaceholder()
 	v := m.viewBody()
 	if m.height > 0 {
 		m.viewH = lipgloss.Height(v)
 		m.viewTop = max(min(m.viewTop, m.height-m.viewH), 0)
+	}
+	// Record the input box's absolute screen rows for drag-select. The input is
+	// hidden during interactive bash (iactive), so there's nothing to select.
+	if m.iactive != nil || m.height == 0 {
+		m.inputTop = -1
+		m.inputLines = nil
+	} else {
+		m.inputTop = m.viewTop + m.inputBodyOff
+		iv := m.input.View()
+		if m.namePrompt != nil && m.namePrompt.mask {
+			iv = m.namePrompt.label + " ┃ " + m.namePrompt.maskedValue(m.input.Value())
+		}
+		raw := strings.Split(iv, "\n")
+		m.inputLines = make([]string, len(raw))
+		for i, ln := range raw {
+			m.inputLines[i] = strings.TrimRight(ansi.Strip(ln), " \t")
+		}
 	}
 	return v
 }
@@ -3934,6 +4057,9 @@ func (m *model) viewBody() string {
 	if m.rew != nil {
 		b.WriteString(m.rewindView() + "\n\n")
 	}
+	// Record where the input box starts (line offset within this viewBody) so
+	// View can convert it to an absolute screen row for drag-select hit-testing.
+	m.inputBodyOff = strings.Count(b.String(), "\n")
 	if m.iactive == nil {
 		if m.namePrompt != nil {
 			b.WriteString(m.namePrompt.label + " ")
@@ -3941,12 +4067,12 @@ func (m *model) viewBody() string {
 				// Secrets never echo: render the mask instead of the input's
 				// live view (which would show the key in the clear). The "┃ "
 				// prompt matches how the textarea renders its own first line.
-				b.WriteString("┃ " + m.namePrompt.maskedValue(m.input.Value()))
+				b.WriteString(m.highlightInput("┃ " + m.namePrompt.maskedValue(m.input.Value())))
 			} else {
-				b.WriteString(m.input.View())
+				b.WriteString(m.highlightInput(m.input.View()))
 			}
 		} else {
-			b.WriteString(m.input.View())
+			b.WriteString(m.highlightInput(m.input.View()))
 		}
 	}
 	if m.quit1 {
@@ -3968,6 +4094,28 @@ func (m *model) viewBody() string {
 	}
 	b.WriteString("\n\n" + m.statusView()) // persistent status line, with a blank line above
 	return b.String()
+}
+
+// inputPlaceholder is the idle input hint; syncInputPlaceholder re-uses it
+// when the busy state clears so the two sites never drift.
+const inputPlaceholder = "Ask whip anything… (/ for commands, tab completes)"
+
+// syncInputPlaceholder reflects the busy state into the input's placeholder:
+// while a turn runs, typing either steers into it (when the agent is only
+// waiting on subagents) or queues behind it. Called from View so it tracks
+// the state every render. headless-safe.
+func (m *model) syncInputPlaceholder() {
+	if m.input.Value() != "" {
+		return // placeholder is hidden once the user is typing
+	}
+	switch {
+	case !m.busy:
+		m.input.Placeholder = inputPlaceholder
+	case m.agent != nil && m.agent.WaitingOnSubagents():
+		m.input.Placeholder = "waiting on subagents — type to steer this turn"
+	default:
+		m.input.Placeholder = "busy — type to queue (sent when the turn ends)"
+	}
 }
 
 // statusView renders the always-on status line below the input: current

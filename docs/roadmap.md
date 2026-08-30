@@ -76,7 +76,7 @@ parallel tool calls and background subagents).
 - [x] `$skill-name` invocation (codex-style) with live completion dropdown; skills re-indexed every turn and every `$` keystroke, so new skills load without restarting the harness
 - [ ] Custom agent definitions (`.agents/*.md` with model/tools/prompt frontmatter; opencode agents config `packages/core/src/config/agent.ts`)
 - [x] Parallel/background subagents (pi streams tool `onUpdate`; opencode `background-job.ts`) — `subagent` with `background:true` runs concurrently and reports back via a steered message; a `taskRegistry` keyed by id holds a `Done` channel whose single close broadcasts completion to every waiter; `/subagents` (alias `/tasks`) lists them, a `⚙ N sub` header badge shows running count and updates live via `OnChange`; tasks persist in the session store and are restored on `--resume` (a stale "running" row comes back as interrupted-error)
-- [x] Subagent model routing (claude's Agent-tool `model` override) — subagents default to the cheap `deepseek-v4-flash-0731` route like compaction (`config.DefaultTaskModel`, catalog suffix scan covers openrouter's vendor-prefixed id); pin with config `taskModel`/`taskProvider`; the main model picks per call via the `subagent` tool's `model`/`provider` params
+- [x] Subagent model routing (claude's Agent-tool `model` override) — subagents default to the cheap `deepseek-v4-flash-0731` route like compaction (`config.DefaultTaskModel`, catalog suffix scan covers openrouter's vendor-prefixed id); pin with ctrl+p › Subagent model or config `taskModel`/`taskProvider`; the main model picks per call via the `subagent` tool's `model`/`provider` params
 - [x] Subagent worktree isolation — `worktreeSubagents` config default + per-call `worktree` arg on `subagent` run a background subagent in its own git worktree (branched off HEAD, sibling dir `<repo>-wt-<task>`), so parallel editing subagents can't scramble the parent's tree; best-effort (falls back to shared cwd outside a repo), foreground subagents stay in-tree (nothing to isolate from)
 - [x] User-spawned subagents: `/subagent [-m model[@provider]] <prompt>` starts one by hand, mid-turn too — the LLM isn't the only driver
 - [x] Chat with a subagent (claude's "subagents are full sessions" UX) — the task pane has a chat input: enter steers a running subagent (`SteerTask`, same primitive the model gets as `subagent_steer`) and runs follow-up turns on a settled one's retained context (`FollowupTask`, live-only)
@@ -127,7 +127,8 @@ Improvement plan with per-item checkboxes: [`.ai-docs/plans/mcp-polish/`](../.ai
 - [x] Single keybind+command registry: palette, slash commands, help, and footer hints all derived from one table (opencode `config/keybind.ts` — the highest value-per-line idea in that repo)
 - [ ] One generic fuzzy-select widget reused by every picker: model, session, theme, timeline (opencode `ui/dialog-select.tsx`)
 - [ ] KV table in sessions.db for palette-toggleable UI prefs — no config ceremony per toggle (opencode `context/kv.tsx` pattern)
-- [ ] Theme support: JSON themes with named defs + `{dark, light}` variant pairs; a "system" theme built from the terminal's real palette (opencode `theme/index.ts`)
+- [x] Ponytail theme support: `~/.whip/themes/*.json` six-role themes, `config.json` `"theme"`, and `/theme` live switcher.
+- [ ] Rich theme support: named defs + `{dark, light}` variant pairs; a "system" theme built from the terminal's real palette (opencode `theme/index.ts`)
 - [x] `"mouse": false` config escape hatch so native terminal selection works (opencode `app.tsx:196`) — also a runtime `/mouse` toggle; with capture on, hold shift to select text in the transcript
 
 ## CLI surface
