@@ -1422,7 +1422,9 @@ func themePollFire(time.Time) tea.Msg { return themePollMsg{} }
 
 // pollClientTheme asks tmux for the outer terminal's current theme.
 func pollClientTheme() tea.Msg {
-	out, err := exec.Command("tmux", "display-message", "-p", "#{client_theme}").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{client_theme}").Output()
 	s := strings.TrimSpace(string(out))
 	return themeSyncMsg{light: s == "light", ok: err == nil && (s == "light" || s == "dark")}
 }

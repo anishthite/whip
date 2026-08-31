@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -236,7 +237,7 @@ func (m *model) sidebarView(height int) string {
 	// Context: tokens used, share of the window, spend.
 	b.WriteString(head.Render("Context") + "\n")
 	u := m.agent.Usage()
-	b.WriteString(dim.Render(fmt.Sprintf("%s tokens", fmtTok(u.PromptTokens+u.CompletionTokens))) + "\n")
+	b.WriteString(dim.Render(fmtTok(u.PromptTokens+u.CompletionTokens)+" tokens") + "\n")
 	if m.agent.ContextLimit > 0 {
 		pct := agent.EstimateTokens(m.agent.Messages) * 100 / m.agent.ContextLimit
 		b.WriteString(dim.Render(fmt.Sprintf("%d%% used", pct)) + "\n")
@@ -320,7 +321,7 @@ func (m *model) opencodePrompt(inner string, width int) string {
 	row := func(content string) string { return ocPadTo(content, width, ebg) }
 	var b strings.Builder
 	b.WriteString(row(bar) + "\n") // paddingTop (bar continues down the whole box)
-	for _, ln := range strings.Split(inner, "\n") {
+	for ln := range strings.SplitSeq(inner, "\n") {
 		// The textarea pads lines to its width with PLAIN spaces (its internal
 		// viewport) — a default-background tail that would punch a white stripe
 		// through the box. Trim it and let ocPadTo re-pad with the box bg.
@@ -461,10 +462,7 @@ func (m *model) newOcBox() ocBoxKit {
 
 // lr assembles left+right onto one padded row: left at col 2, right at the edge.
 func (k ocBoxKit) lr(left, right string) string {
-	gap := k.w - 2 - lipgloss.Width(left) - lipgloss.Width(right) - 2
-	if gap < 1 {
-		gap = 1
-	}
+	gap := max(k.w-2-lipgloss.Width(left)-lipgloss.Width(right)-2, 1)
 	return ocPadTo(k.pnl.Render("  ")+left+k.pnl.Render(strings.Repeat(" ", gap))+right, k.w, k.bg)
 }
 
@@ -483,7 +481,7 @@ func (m *model) ocDialogRows() []string {
 	// a sub-panel (theme picker, model list, …) renders inside the same box
 	if pp := p.top(); pp != nil {
 		rows := []string{blank, lr(head.Render("Commands › "+pp.title), muted.Render("esc")), blank}
-		for _, ln := range strings.Split(strings.TrimRight(m.panelView(pp), "\n"), "\n") {
+		for ln := range strings.SplitSeq(strings.TrimRight(m.panelView(pp), "\n"), "\n") {
 			rows = append(rows, ocPadTo(pnl.Render("  ")+ocOnBg(ln, bg), w, bg))
 		}
 		return append(rows, blank)
@@ -838,9 +836,9 @@ func (m *model) ocLeaderChord(k string) (tea.Model, tea.Cmd, bool) {
 	case "g": // jump back through messages (whip's rewind picker)
 		m.openRewind()
 	case "y": // copy last assistant message
-		for i := len(m.blocks) - 1; i >= 0; i-- {
-			if m.blocks[i].kind == blockAssistant {
-				copyText(ansi.Strip(m.blocks[i].text))
+		for _, b := range slices.Backward(m.blocks) {
+			if b.kind == blockAssistant {
+				copyText(ansi.Strip(b.text))
 				return m, m.showToast("Message copied to clipboard!"), true
 			}
 		}
@@ -1025,7 +1023,7 @@ func (m *model) applyUIMode(mode string) {
 		m.input.Prompt = "" // opencodePrompt supplies the ┃ bar per line
 		// opencode's placeholder carries a random example (picked once, not cycled)
 		examples := []string{"Fix a TODO in the codebase", "What is the tech stack of this project?", "Fix broken tests"}
-		m.input.Placeholder = fmt.Sprintf("Ask anything… %q", examples[rand.IntN(len(examples))])
+		m.input.Placeholder = fmt.Sprintf("Ask anything… %q", examples[rand.IntN(len(examples))]) //nolint:gosec // G404: cosmetic placeholder pick, not security-sensitive
 		// Fill the textarea with the element background so the input box reads as
 		// a filled panel (opencode's prompt box).
 		elem := lipgloss.NewStyle().Background(ocElementBg())
