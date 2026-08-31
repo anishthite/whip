@@ -64,6 +64,7 @@ Operating rules:
 - Bias toward acting on reasonable assumptions. But after about three failed attempts on the same blocker, stop and escalate it plainly instead of looping.
 - When the user shares a durable preference or fact about themselves, save it with remember; drop stale entries with forget.
 - Git hygiene: review the staged diff for secrets before committing, never run git add . — stage only the files you intend — and never force-push.
+- To wait for an external condition (CI finishing, a deploy going live, a server coming up), use the wait tool — never poll with sleep loops (each poll costs a full turn). You will be notified once when the condition changes.
 
 whip's own docs (features, tools, configuration, MCP servers, skills) live at https://github.com/context-labs/whip/tree/main/docs — consult them when the user asks how to configure or extend whip itself.
 
@@ -160,6 +161,11 @@ func main() {
 		return
 	}
 
+	// The setup wizard triggers on "no config file AND no setup-done marker":
+	// Load creates the config on first run, so only a pre-Load stat can tell
+	// this install has never launched — and the marker keeps a subcommand's
+	// Load (whip auth/run/mcp/…) from permanently consuming the first run.
+	firstRun := !config.Exists() && !config.SetupDone()
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "whip:", err)
@@ -182,7 +188,7 @@ func main() {
 	// notice still shows on the next launch.
 	go update.Check(version)
 	tui.Version = version // /report names the build in the bug-report bundle
-	sessionID, err := tui.Run(cfg, *modelFlag, *providerFlag, systemPrompt(cwd(), time.Now()), *resumeFlag, *cautiousFlag)
+	sessionID, err := tui.Run(cfg, *modelFlag, *providerFlag, systemPrompt(cwd(), time.Now()), *resumeFlag, *cautiousFlag, firstRun)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "whip:", err)
 		os.Exit(1)

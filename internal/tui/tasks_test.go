@@ -355,9 +355,11 @@ func TestEnterOpensTaskViewAndEscBacksOut(t *testing.T) {
 	}
 }
 
-// dockTasks is time-dependent (settled tasks age out after dockSettledGrace),
-// so the focused dock can go empty — or shrink below the selection — between
-// the last paint and the keypress. Enter must not index the empty list.
+// settled tasks linger in the dock until the user sends a new message, so the
+// focused dock's list is stable between the last paint and the keypress
+// (submitTurn sweeps it on the next authored turn). Enter must not index the
+// empty list, and a stale selection beyond the list clamps instead of
+// panicking.
 func TestEnterOnEmptyFocusedDockDoesNotPanic(t *testing.T) {
 	srv := sseTextServer(t, "ok")
 	defer srv.Close()
@@ -469,8 +471,85 @@ func TestSettledTaskViewShowsReport(t *testing.T) {
 	if !strings.Contains(stripAll(m.taskViewView()), "the final report") {
 		t.Fatalf("settled task view should render the report, got %q", stripAll(m.taskViewView()))
 	}
-	if m.agent.Tasks().Subscribe(task.ID, agent.Events{}) {
-		t.Fatal("subscribing a settled task should fail")
+	if _, _, ok := m.agent.Tasks().SubscribeWithJournal(task.ID, agent.Events{}); ok {
+		t.Fatal("subscribing a settled task should not report live")
+	}
+}
+
+// The detail view replays the journaled transcript, so opening a task AFTER
+// it emitted (or even settled) shows the full history — tool calls included —
+// not just the final report.
+func TestTaskViewReplaysJournal(t *testing.T) {
+	call := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		call++
+		switch call {
+		case 1:
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"t1","type":"function","function":{"name":"read","arguments":"{\"path\":\"/tmp/x\"}"}}]}}]}`+"\n\n")
+			fmt.Fprint(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		default:
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"the final report"},"finish_reason":"stop"}]}`+"\n\n")
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	m := tasksModel(srv.URL)
+	task := m.agent.StartBackground("probe", "p", agent.SubModel{})
+	waitSettled(t, task)
+
+	m.openTask(task.ID)
+	if m.taskVP.live {
+		t.Fatal("a settled task's view should not subscribe to events")
+	}
+	view := stripAll(m.taskViewView())
+	for _, want := range []string{"⚒ read", "the final report", "done:"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("replayed view missing %q:\n%s", want, view)
+		}
+	}
+}
+
+// Opening a RUNNING task replays what streamed before the open, then keeps
+// streaming live events after it.
+func TestRunningTaskViewReplaysThenStreams(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"early-text"}}]}`+"\n\n")
+		w.(http.Flusher).Flush() // delivered before the view opens
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"late-text"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(func() { close(release) })
+	defer srv.Close()
+	m := tasksModel(srv.URL)
+	task := m.agent.StartBackground("probe", "p", agent.SubModel{})
+	defer m.agent.Tasks().Cancel(task.ID)
+
+	// Wait for the journal to hold the early delta, then open mid-run.
+	for range 100 {
+		if events, _, _ := m.agent.Tasks().SubscribeWithJournal(task.ID, agent.Events{}); len(events) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	m.openTask(task.ID)
+	if !m.taskVP.live {
+		t.Fatal("a running task's view should subscribe to live events")
+	}
+	if view := stripAll(m.taskViewView()); !strings.Contains(view, "early-text") {
+		t.Fatalf("view opened mid-run should replay pre-open output:\n%s", view)
+	}
+	// Live events keep arriving after the open (headless model: Update direct).
+	m.Update(taskEventMsg{id: task.ID, kind: 0, s: "late-text"})
+	if view := stripAll(m.taskViewView()); !strings.Contains(view, "late-text") {
+		t.Fatalf("live event after open missing:\n%s", view)
 	}
 }
 
@@ -790,5 +869,59 @@ func TestRestoredTaskReplaysPersistedTranscript(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("restored task view should replay the persisted transcript, missing %q:\n%s", want, view)
 		}
+	}
+}
+
+// A steered message in the subagent view renders as a user message — the
+// steering main agent (or the human in the task chat) is the subagent's
+// orchestrator, acting as its user. The transcript should read like a normal
+// user turn, not a system note.
+func TestSteeredMessageRendersAsUser(t *testing.T) {
+	srv := sseTextServer(t, "ok")
+	defer srv.Close()
+	m := tasksModel(srv.URL)
+	task := m.agent.StartBackground("probe", "p", agent.SubModel{})
+	defer m.agent.Tasks().Cancel(task.ID)
+	m.openTask(task.ID)
+
+	// live path: a steer event renders with the "you:" label
+	m.Update(taskEventMsg{id: task.ID, kind: 3, s: "check the other file too"})
+	view := stripAll(m.taskViewView())
+	if !strings.Contains(view, "you: check the other file too") {
+		t.Fatalf("steered message should render as a user turn, got:\n%s", view)
+	}
+	if strings.Contains(view, "steered:") || strings.Contains(view, "you (steer)") {
+		t.Fatalf("steered message must not carry a 'steered' label, got:\n%s", view)
+	}
+}
+
+// Settled tasks stay in the dock until the user sends a new message: a
+// machine turn (steer/wake, authored=false) must NOT sweep them, a user-typed
+// turn (authored=true) does.
+func TestSettledTasksLingerUntilUserMessage(t *testing.T) {
+	srv := sseTextServer(t, "ok")
+	defer srv.Close()
+	m := tasksModel(srv.URL)
+	task := m.agent.StartBackground("finished probe", "p", agent.SubModel{})
+	waitSettled(t, task)
+
+	// still in the dock after settling (no age-out)
+	if len(m.dockTasks()) != 1 {
+		t.Fatalf("settled task should stay in the dock, got %d", len(m.dockTasks()))
+	}
+
+	// a machine turn (authored=false, e.g. a steered report or wake) must not sweep it
+	m.submitTurn("[subagent done] report", false)
+	if len(m.dockTasks()) != 1 {
+		t.Fatal("a machine turn must not clear the settled task from the dock")
+	}
+
+	// the user sending a new message sweeps it
+	m2 := tasksModel(srv.URL)
+	task2 := m2.agent.StartBackground("another probe", "p", agent.SubModel{})
+	waitSettled(t, task2)
+	m2.submitTurn("what's next?", true)
+	if len(m2.dockTasks()) != 0 {
+		t.Fatalf("a user message should sweep settled tasks, got %d", len(m2.dockTasks()))
 	}
 }
