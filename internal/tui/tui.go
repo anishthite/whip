@@ -3058,7 +3058,7 @@ func (m *model) refreshMenu() {
 		return // previewing a frozen candidate; nothing to re-filter
 	}
 	val := m.input.Value()
-	token := val[strings.LastIndexByte(val, ' ')+1:]
+	token := val[strings.LastIndexAny(val, " \n")+1:]
 	if strings.HasPrefix(val, "/") || strings.HasPrefix(token, "@") || strings.HasPrefix(token, "$") {
 		head, cands := completions(val, m.modelCands(), m.providerCands(), m.skillCands(), effortCandsFor(m.effortsFor()))
 		if len(cands) > 0 {
