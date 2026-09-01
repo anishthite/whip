@@ -60,14 +60,26 @@ func TestInitialPromptSubmitsFirstTurn(t *testing.T) {
 	}
 }
 
-// Without an initial prompt Init stays the plain blink cmd (batch-free), and
-// a stray initialPromptMsg against an empty/busy model is a no-op.
+// Without an initial prompt Init never emits the kickoff — whether it returns
+// the bare blink cmd or a batch (tmux theme polling also batches) — and a
+// stray initialPromptMsg against an empty/busy model is a no-op.
 func TestNoInitialPromptNoKickoff(t *testing.T) {
 	m := busyQueueModel()
-	if cmd := m.Init(); cmd == nil {
+	cmd := m.Init()
+	if cmd == nil {
 		t.Fatal("Init always returns at least textarea.Blink")
-	} else if _, is := cmd().(tea.BatchMsg); is {
-		t.Fatal("without an initial prompt Init must stay the bare blink cmd (no batch)")
+	}
+	if msg := cmd(); msg != nil {
+		if _, is := msg.(initialPromptMsg); is {
+			t.Fatal("without an initial prompt Init must not emit the kickoff")
+		}
+		if batch, is := msg.(tea.BatchMsg); is {
+			for _, c := range batch {
+				if _, is := c().(initialPromptMsg); is {
+					t.Fatal("without an initial prompt the batch must not carry the kickoff")
+				}
+			}
+		}
 	}
 
 	m.initialPrompt = ""
