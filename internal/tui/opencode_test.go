@@ -14,6 +14,7 @@ import (
 	"github.com/context-labs/whip/internal/llm"
 	"github.com/context-labs/whip/internal/lsp"
 	"github.com/context-labs/whip/internal/session"
+	"github.com/context-labs/whip/internal/tools"
 	"github.com/muesli/termenv"
 )
 
@@ -336,6 +337,28 @@ func TestClickOpensMsgActions(t *testing.T) {
 	m.clickAt(5, 1)
 	if m.msgActions == nil || m.msgActions.block != 0 {
 		t.Fatalf("click should open Message Actions on block 0, got %+v", m.msgActions)
+	}
+}
+
+// TestClickAtBounds: clicks left of the margin, past the main column (the
+// sidebar/gap), or under an open completion menu must not act on the
+// transcript block sharing that row.
+func TestClickAtBounds(t *testing.T) {
+	old := ocActive
+	t.Cleanup(func() { ocActive = old })
+	ocActive = true
+	m := &model{width: 80, uiMode: opencodeMode, viewH: 10}
+	m.blocks = []block{{kind: blockUser, text: "hello", y0: 0, y1: 2}}
+	m.clickAt(1, 1) // left of the opencode margin
+	m.clickAt(m.vpXOff()+m.width, 1)
+	m.clickAt(120, 1) // sidebar column
+	if m.msgActions != nil {
+		t.Fatalf("out-of-column click opened Message Actions: %+v", m.msgActions)
+	}
+	m.menu = &menu{}
+	m.clickAt(5, 1) // under the spliced completion popup
+	if m.msgActions != nil {
+		t.Fatal("click under the open menu should not reach the transcript")
 	}
 }
 
@@ -925,6 +948,48 @@ func TestOpencodeStatus(t *testing.T) {
 	if again := m.opencodeStatus(); !strings.Contains(again, "again to interrupt") {
 		t.Fatalf("interrupt1 status = %q", again)
 	}
+
+	// narrow + busy: the spinner/hint side has no trim of its own — the row
+	// must clamp to the terminal width or the alt-screen frame wraps
+	m.width = 12
+	if nb := m.opencodeStatus(); lipgloss.Width(nb) > 12 {
+		t.Fatalf("narrow busy status is %d cells, want <= 12: %q", lipgloss.Width(nb), nb)
+	}
+}
+
+// TestOpencodePromptClampsWideLines: a full-width input line (bar + gutter +
+// content) must truncate, not wrap — a wrapped row grows the frame past
+// layout()'s budget and skews every mouse-Y hit-test.
+func TestOpencodePromptClampsWideLines(t *testing.T) {
+	m := &model{input: newInput(), cfg: &config.Config{}, agent: &agent.Agent{}}
+	out := m.opencodePrompt(strings.Repeat("x", 100), 40)
+	for i, ln := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(ln); w > 40 {
+			t.Fatalf("prompt row %d is %d cells, want <= 40: %q", i, w, ln)
+		}
+	}
+}
+
+// TestGrowInputKeepsModeChrome: growInput rebuilds the textarea; the rebuild
+// must carry the current mode's prompt/placeholder/styles or opencode mode
+// reverts to whip's "┃ " prompt (a double bar that widens the box row).
+func TestGrowInputKeepsModeChrome(t *testing.T) {
+	t.Cleanup(func() { ocActive = false })
+	m := &model{input: newInput(), width: 80, height: 30}
+	m.input.SetWidth(78)
+	m.applyUIMode(opencodeMode)
+	ph := m.input.Placeholder
+	m.input.SetValue("line one\nline two\nline three")
+	m.growInput()
+	if m.input.Height() < 2 {
+		t.Fatalf("input did not grow: height=%d", m.input.Height())
+	}
+	if m.input.Prompt != "" || m.input.Placeholder != ph {
+		t.Fatalf("grow reverted opencode chrome: prompt=%q placeholder=%q", m.input.Prompt, m.input.Placeholder)
+	}
+	if m.input.FocusedStyle.Text.GetBackground() != ocElementBg() {
+		t.Fatal("grow dropped the element-bg fill")
+	}
 }
 
 func TestApplyUIModeSwapsSpinner(t *testing.T) {
@@ -983,6 +1048,81 @@ func TestLspSummary(t *testing.T) {
 	m2 := &model{lspMgr: lsp.NewManager(nil)}
 	if got := m2.lspSummary(); got != "no servers" {
 		t.Fatalf("empty manager = %q", got)
+	}
+}
+
+// TestSetUIModeFlushesThink: a ctrl+p UI-mode toggle is reachable mid-stream —
+// the reasoning accumulated in the OLD mode's fields must land in the
+// transcript, not be silently discarded (opencode→default) or fused into the
+// next turn's Thought with a bogus duration (stale thinkStart/ocThink).
+func TestSetUIModeFlushesThink(t *testing.T) {
+	t.Cleanup(func() { ocActive = false })
+
+	// opencode → default: ocThink drains into a blockThought
+	m := &model{cfg: &config.Config{}, input: newInput(), width: 80, height: 30, uiMode: opencodeMode}
+	ocActive = true
+	m.thinkStart = time.Now().Add(-2 * time.Second)
+	m.ocThink = "deep reasoning"
+	m.inThink = true
+	m.setUIMode("")
+	if !m.thinkStart.IsZero() || m.ocThink != "" || m.inThink {
+		t.Fatalf("stale think state after toggle: start=%v ocThink=%q inThink=%v", m.thinkStart, m.ocThink, m.inThink)
+	}
+	var kept bool
+	for _, b := range m.blocks {
+		if b.kind == blockThought && strings.Contains(b.text, "deep reasoning") {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Fatal("toggle discarded the streamed reasoning")
+	}
+
+	// default → opencode: curThink drains through the default-mode flush
+	m2 := &model{cfg: &config.Config{}, input: newInput(), width: 80, height: 30}
+	m2.curThink = "partial thought"
+	m2.inThink = true
+	m2.setUIMode(opencodeMode)
+	if m2.curThink != "" || m2.inThink {
+		t.Fatalf("default-mode think state not flushed: %q", m2.curThink)
+	}
+	var drained bool
+	for _, b := range m2.blocks {
+		if strings.Contains(b.text, "partial thought") {
+			drained = true
+		}
+	}
+	if !drained {
+		t.Fatal("default-mode reasoning lost on toggle")
+	}
+}
+
+// TestEffortClickGatedInOpencode: opencode mode renders no header, so a click
+// on the top row must not invisibly cycle reasoning effort.
+func TestEffortClickGatedInOpencode(t *testing.T) {
+	t.Cleanup(func() { ocActive = false })
+	m := tasksModel("http://unused")
+	m.cfg = &config.Config{}
+	m.uiMode = opencodeMode
+	ocActive = true
+	m.effortX = 60
+	before := m.agent.Effort
+	m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 70, Y: m.viewTop})
+	if m.agent.Effort != before {
+		t.Fatalf("opencode-mode click cycled effort to %q", m.agent.Effort)
+	}
+}
+
+// TestLayoutBudgetsPermDialog: viewBody renders the permission modal, so
+// layout must budget its rows or the frame over-renders and mouse math drifts.
+func TestLayoutBudgetsPermDialog(t *testing.T) {
+	m := tasksModel("http://unused")
+	m.layout()
+	h0 := m.vp.Height
+	m.permDialog = &permDialog{req: tools.GateRequest{Tool: "bash", Command: "make build", Rule: "make"}}
+	m.layout()
+	if want := lipgloss.Height(m.permView()) + 1; h0-m.vp.Height != want {
+		t.Fatalf("perm dialog chrome = %d rows, want %d", h0-m.vp.Height, want)
 	}
 }
 

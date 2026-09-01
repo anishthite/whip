@@ -403,7 +403,12 @@ func (m *model) selEdgeScroll() tea.Cmd {
 // area reaches here. Row math matches selPoint (y is an absolute screen row).
 func (m *model) clickAt(x, y int) {
 	y -= m.viewTop
-	if y <= m.vpTopRows()-2 || m.palette != nil || m.viewH == 0 {
+	if y <= m.vpTopRows()-2 || m.palette != nil || m.menu != nil || m.viewH == 0 {
+		return
+	}
+	// bound x like updateHover does: a click in the sidebar or the gap
+	// columns must not act on the transcript block sharing that row
+	if x < m.vpXOff() || x >= m.vpXOff()+m.width {
 		return
 	}
 	row := y - m.vpTopRows() - m.contentPad() + m.vp.YOffset + m.vpLead

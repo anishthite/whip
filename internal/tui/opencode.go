@@ -319,7 +319,10 @@ func (m *model) opencodePrompt(inner string, width int) string {
 	ebg := ocElementBg()
 	elem := lipgloss.NewStyle().Background(ebg)
 	bar := lipgloss.NewStyle().Foreground(ocAgentCol()).Background(ebg).Render("┃")
-	row := func(content string) string { return ocPadTo(content, width, ebg) }
+	// truncate BEFORE padding: a full-width input line (bar + 2-space gutter +
+	// content) exceeds width, wraps in the terminal, and grows the alt-screen
+	// frame a row past layout()'s budget — skewing every mouse-Y hit-test
+	row := func(content string) string { return ocPadTo(ansi.Truncate(content, width, ""), width, ebg) }
 	var b strings.Builder
 	b.WriteString(row(bar) + "\n") // paddingTop (bar continues down the whole box)
 	for ln := range strings.SplitSeq(inner, "\n") {
@@ -433,7 +436,14 @@ func (m *model) opencodeStatus() string {
 		leftR = muted.Render(" " + left)
 	}
 	pad := max(w-lipgloss.Width(leftR)-rightW, 1)
-	return leftR + muted.Render(strings.Repeat(" ", pad)) + right
+	line := leftR + muted.Render(strings.Repeat(" ", pad)) + right
+	if w > 0 {
+		// the busy side (spinner + esc hint) has no width-aware trim of its
+		// own: clamp the row or it wraps the alt-screen frame on a narrow
+		// terminal and shifts all mouse math
+		line = ansi.Truncate(line, w, "")
+	}
+	return line
 }
 
 // opencodePaletteView renders the ctrl+p command list as opencode's Commands
@@ -1083,6 +1093,11 @@ func (m *model) setUIMode(mode string) tea.Cmd {
 	if mode != opencodeMode {
 		mode = ""
 	}
+	// a mid-stream toggle must not strand reasoning in the old mode's fields:
+	// flush under the OLD uiMode (each branch drains its own accumulator),
+	// then clear the opencode fields a zero thinkStart would leave behind
+	m.flushThink()
+	m.thinkStart, m.ocThink = time.Time{}, ""
 	m.applyUIMode(mode)
 	m.cfg.UIMode = mode
 	if m.cfgExtra == nil {

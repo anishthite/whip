@@ -1652,11 +1652,20 @@ func (m *model) growInput() {
 	}
 	val := m.input.Value()
 	ti := newInput()
-	ti.SetWidth(m.input.Width() + 2) // Width() is content width; SetWidth takes total
+	// carry the CURRENT mode's chrome over: newInput bakes whip's defaults
+	// ("┃ " prompt, whip placeholder, plain styles), which in opencode mode
+	// would draw a double bar, revert the element-bg fills, and — since the
+	// prompt eats 2 content cells — widen the box row past the frame
+	ti.Prompt = m.input.Prompt
+	ti.Placeholder = m.input.Placeholder
+	ti.FocusedStyle = m.input.FocusedStyle
+	ti.BlurredStyle = m.input.BlurredStyle
+	ti.SetWidth(m.input.Width() + lipgloss.Width(ti.Prompt)) // Width() is content width; SetWidth takes total
 	ti.SetHeight(h)
 	ti.SetValue(val)
 	ti.CursorEnd()
 	m.input = ti
+	m.input.Focus() // re-snapshot the style pointer at the COPIED struct (see applyUIMode)
 }
 
 // layout gives the viewport whatever height the chrome doesn't need,
@@ -1695,6 +1704,9 @@ func (m *model) layout() {
 	}
 	if m.iactive != nil {
 		chrome += lipgloss.Height(m.interactiveView()) + 1
+	}
+	if m.permDialog != nil {
+		chrome += lipgloss.Height(m.permView()) + 1 // viewBody emits "\n"+permView(); unbudgeted it clips the alt-screen frame and shifts mouse rows
 	}
 	if m.menu != nil && m.uiMode != opencodeMode {
 		// measure the actual render (descriptions can word-wrap). opencode mode
@@ -1881,8 +1893,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// clicking the ⚡ control in the header cycles reasoning effort
-		// (mouse Y is an absolute screen row; the header is the view's top row)
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft &&
+		// (mouse Y is an absolute screen row; the header is the view's top
+		// row — opencode mode has no header, so the branch must not fire)
+		if m.uiMode != opencodeMode &&
+			msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft &&
 			msg.Y == m.viewTop && msg.X >= m.effortX {
 			m.setEffort(nextEffort(m.effortsFor(), m.agent.Effort))
 			return m, nil
