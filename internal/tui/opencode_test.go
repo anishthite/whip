@@ -1068,6 +1068,9 @@ func TestSetUIModeFlushesThink(t *testing.T) {
 	if !m.thinkStart.IsZero() || m.ocThink != "" || m.inThink {
 		t.Fatalf("stale think state after toggle: start=%v ocThink=%q inThink=%v", m.thinkStart, m.ocThink, m.inThink)
 	}
+	if m.viewTop != 1<<30 {
+		t.Fatalf("mode switch must arm the viewTop re-anchor sentinel, got %d", m.viewTop)
+	}
 	var kept bool
 	for _, b := range m.blocks {
 		if b.kind == blockThought && strings.Contains(b.text, "deep reasoning") {

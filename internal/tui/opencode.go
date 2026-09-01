@@ -1099,6 +1099,11 @@ func (m *model) setUIMode(mode string) tea.Cmd {
 	m.flushThink()
 	m.thinkStart, m.ocThink = time.Time{}, ""
 	m.applyUIMode(mode)
+	// leaving the alt screen restores a bottom-anchored inline view, but only
+	// WindowSizeMsg resets the re-anchor sentinel — without it viewTop stays
+	// at opencode's pinned 0 and every mouse row maps above the pointer until
+	// the next resize. View() recomputes viewTop from this sentinel.
+	m.viewTop = 1 << 30
 	m.cfg.UIMode = mode
 	if m.cfgExtra == nil {
 		m.cfgExtra = map[string]string{}
