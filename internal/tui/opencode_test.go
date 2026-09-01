@@ -554,6 +554,34 @@ func TestMenuViewClampedInOpencodeMode(t *testing.T) {
 	}
 }
 
+func TestOcMenuOverlay(t *testing.T) {
+	m := &model{width: 60, termWidth: 60, uiMode: opencodeMode, inputBodyOff: 20}
+	m.menu = &menu{cands: []cand{{Text: "/auth", Desc: "connect"}, {Text: "/cd", Desc: "chdir"}}}
+	backdrop := strings.TrimSuffix(strings.Repeat(strings.Repeat("x", 60)+"\n", 30), "\n")
+	out := m.ocMenuOverlay(backdrop)
+	lines := strings.Split(out, "\n")
+	if len(lines) != 30 {
+		t.Fatalf("overlay changed line count: %d", len(lines))
+	}
+	// menu rows land immediately ABOVE the input box row (inputBodyOff)
+	joined := strings.Join(lines[:20], "\n")
+	if !strings.Contains(joined, "/auth") || !strings.Contains(joined, "1/2") {
+		t.Fatalf("menu not above the input box:\n%s", out)
+	}
+	if strings.Contains(strings.Join(lines[20:], "\n"), "/auth") {
+		t.Fatal("menu must not render below the input box")
+	}
+	// bottom row of the menu touches the box top
+	if !strings.Contains(lines[19], "1/2") {
+		t.Fatalf("menu bottom not anchored to the input box top: %q", lines[19])
+	}
+	// no room above: clipped from the top, never overflowing
+	m.inputBodyOff = 1
+	if got := len(strings.Split(m.ocMenuOverlay(backdrop), "\n")); got != 30 {
+		t.Fatalf("clipped overlay changed line count: %d", got)
+	}
+}
+
 func TestOcDimLine(t *testing.T) {
 	if got := ocDimLine(""); got != "" {
 		t.Fatalf("empty line should stay empty, got %q", got)

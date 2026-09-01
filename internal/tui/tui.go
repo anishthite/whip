@@ -1692,9 +1692,9 @@ func (m *model) layout() {
 	if m.iactive != nil {
 		chrome += lipgloss.Height(m.interactiveView()) + 1
 	}
-	if m.menu != nil {
-		// measure the actual render: opencode mode word-wraps descriptions, so
-		// the menu can be taller than one row per candidate
+	if m.menu != nil && m.uiMode != opencodeMode {
+		// measure the actual render (descriptions can word-wrap). opencode mode
+		// takes no rows at all: the menu overlays the frame from View()
 		chrome += lipgloss.Height(m.menuView()) + 1
 	}
 	if len(m.queue) > 0 {
@@ -4224,6 +4224,8 @@ func (m *model) View() string {
 			v = m.ocOverlayRows(v, m.ocModelDialogRows())
 		case m.picker != nil:
 			v = m.ocOverlayRows(v, m.ocSessionDialogRows())
+		case m.menu != nil:
+			v = m.ocMenuOverlay(v) // completion popup floats above the input, no reflow
 		}
 		if m.toast != "" {
 			v = m.ocSpliceToast(v) // top-right toast, over everything
@@ -4401,7 +4403,9 @@ func (m *model) viewBody() string {
 	} else if m.esc1 && m.rew == nil && m.namePrompt == nil {
 		b.WriteString("\n" + dimStyle.Render("esc again: rewind the conversation"))
 	}
-	if m.menu != nil {
+	if m.menu != nil && m.uiMode != opencodeMode {
+		// opencode mode: View() overlays the menu ABOVE the input instead —
+		// drawn on top of the frame, so nothing reflows while typing
 		b.WriteString("\n" + m.menuView())
 	}
 	// the persistent background-subagent strip sits just below the input box

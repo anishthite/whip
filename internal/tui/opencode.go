@@ -801,19 +801,7 @@ func (m *model) ocSpliceToast(v string) string {
 	w := lipgloss.Width(inner) + 6
 	mid := bar + pnl.Render("  ") + txt.Render(inner) + pnl.Render("  ") + bar
 	pad := ocPadTo(bar, w-1, bg) + bar // side bars on the padding rows too
-	rows := []string{pad, mid, pad}
-	lines := strings.Split(v, "\n")
-	x := max(m.termWidth-w-2, 0)
-	for i := 0; i < len(rows) && i+2 < len(lines); i++ {
-		l := lines[i+2]
-		left := ansi.Truncate(l, x, "")
-		if pad := x - lipgloss.Width(left); pad > 0 {
-			left += strings.Repeat(" ", pad)
-		}
-		right := ansi.TruncateLeft(l, x+w, "")
-		lines[i+2] = left + "\x1b[0m" + rows[i] + "\x1b[0m" + right
-	}
-	return strings.Join(lines, "\n")
+	return ocSpliceAt(v, []string{pad, mid, pad}, max(m.termWidth-w-2, 0), 2)
 }
 
 // ocLeaderChord dispatches an opencode leader chord (ctrl+x then a key,
@@ -957,28 +945,51 @@ func (m *model) ocOverlay(v string) string {
 	return m.ocOverlayRows(v, m.ocDialogRows()) // rows never empty: dialog chrome is unconditional
 }
 
+// ocSpliceAt paints rows onto the frame starting at column x, row y — the
+// ANSI-aware overlay primitive behind the dialogs, the toast, and the
+// completion popup. Rows outside the frame are skipped.
+func ocSpliceAt(v string, rows []string, x, y int) string {
+	lines := strings.Split(v, "\n")
+	for i, r := range rows {
+		li := y + i
+		if li < 0 || li >= len(lines) {
+			continue
+		}
+		l := lines[li]
+		left := ansi.Truncate(l, x, "")
+		if pad := x - lipgloss.Width(left); pad > 0 {
+			left += strings.Repeat(" ", pad)
+		}
+		right := ansi.TruncateLeft(l, x+lipgloss.Width(r), "")
+		lines[li] = left + "\x1b[0m" + r + "\x1b[0m" + right
+	}
+	return strings.Join(lines, "\n")
+}
+
 // ocOverlayRows dims the frame and splices the given dialog rows in centered.
 func (m *model) ocOverlayRows(v string, rows []string) string {
 	lines := strings.Split(v, "\n")
+	for i := range lines {
+		lines[i] = ocDimLine(lines[i])
+	}
 	w := lipgloss.Width(rows[0])
 	x := max((max(m.termWidth, w)-w)/2, 0)
 	if len(rows) > len(lines) {
 		rows = rows[:len(lines)] // ponytail: bottom-clip; scroll-follow selection if lists outgrow screens
 	}
 	y := max((len(lines)-len(rows))/3, 0)
-	for i, l := range lines {
-		l = ocDimLine(l)
-		if i >= y && i < y+len(rows) {
-			left := ansi.Truncate(l, x, "")
-			if pad := x - lipgloss.Width(left); pad > 0 {
-				left += strings.Repeat(" ", pad)
-			}
-			right := ansi.TruncateLeft(l, x+w, "")
-			l = left + "\x1b[0m" + rows[i-y] + "\x1b[0m" + right
-		}
-		lines[i] = l
+	return ocSpliceAt(strings.Join(lines, "\n"), rows, x, y)
+}
+
+// ocMenuOverlay draws the completion popup ON TOP of the frame, bottom-anchored
+// to the row just above the input box (opencode's autocomplete position) — the
+// frame beneath never reflows while typing.
+func (m *model) ocMenuOverlay(v string) string {
+	rows := strings.Split(m.menuView(), "\n")
+	if len(rows) > m.inputBodyOff { // clip the top if there's no room above the box
+		rows = rows[len(rows)-m.inputBodyOff:]
 	}
-	return strings.Join(lines, "\n")
+	return ocSpliceAt(v, rows, opencodeLeftMargin, m.inputBodyOff-len(rows))
 }
 
 // opencodeAttribution renders opencode's per-response attribution line:
