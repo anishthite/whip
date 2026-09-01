@@ -215,13 +215,21 @@ func TestRunSystemOverride(t *testing.T) {
 	}
 }
 
-// -max-turns caps the tool loop; a capped run errors non-zero.
+// -max-turns caps the tool loop; on the cap the model makes one final no-tools
+// answer instead of erroring.
 func TestRunMaxTurns(t *testing.T) {
-	// a server that always calls a tool (never finishes)
+	// Loops tool calls while tools are offered; answers with text once the
+	// final (no-tools) request arrives — like a real model.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req llm.Request
+		json.NewDecoder(r.Body).Decode(&req)
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"t1","type":"function","function":{"name":"read","arguments":"{\"path\":\"/tmp/x\"}"}}]}}]}`+"\n\n")
-		fmt.Fprint(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		if len(req.Tools) == 0 {
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"final answer"},"finish_reason":"stop"}]}`+"\n\n")
+		} else {
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"t1","type":"function","function":{"name":"read","arguments":"{\"path\":\"/tmp/x\"}"}}]}}]}`+"\n\n")
+			fmt.Fprint(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		}
 		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer srv.Close()
@@ -234,9 +242,12 @@ func TestRunMaxTurns(t *testing.T) {
 	}`, srv.URL)
 	os.WriteFile(filepath.Join(home, "config.json"), []byte(cfg), 0o600)
 
-	_, err := runCapture(t, "", "-max-turns", "2", "-no-session", "loop forever")
-	if err == nil || !strings.Contains(err.Error(), "max turns") {
-		t.Fatalf("a capped run should error with 'max turns', got %v", err)
+	out, err := runCapture(t, "", "-max-turns", "2", "-no-session", "loop forever")
+	if err != nil {
+		t.Fatalf("a capped run should finalize, not error: %v", err)
+	}
+	if !strings.Contains(out, "final answer") {
+		t.Fatalf("capped run should return the forced final answer, got %q", out)
 	}
 }
 
@@ -362,9 +373,17 @@ func TestRunJSONToolEvents(t *testing.T) {
 	if err := os.WriteFile(target, []byte("file body"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// a server that always answers with a read tool call: only -max-turns ends it
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// Answers with a read tool call while tools are offered; once -max-turns
+	// forces a no-tools call, answers with text.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req llm.Request
+		json.NewDecoder(r.Body).Decode(&req)
 		w.Header().Set("Content-Type", "text/event-stream")
+		if len(req.Tools) == 0 {
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`+"\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
 		args, _ := json.Marshal(map[string]string{"path": target})
 		call, _ := json.Marshal(string(args))
 		fmt.Fprintf(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"t1","type":"function","function":{"name":"read","arguments":%s}}]}}]}`+"\n\n", call)
@@ -385,8 +404,8 @@ func TestRunJSONToolEvents(t *testing.T) {
 	}
 
 	out, err := runCapture(t, "", "-format", "json", "-max-turns", "2", "-quiet", "-no-session", "read it")
-	if err == nil {
-		t.Fatal("a capped run should error")
+	if err != nil {
+		t.Fatalf("a capped run should finalize, not error: %v", err)
 	}
 	seen := map[string]string{}
 	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
@@ -394,7 +413,7 @@ func TestRunJSONToolEvents(t *testing.T) {
 		if uerr := json.Unmarshal([]byte(line), &ev); uerr != nil {
 			t.Fatalf("stdout should be NDJSON, got %q: %v", line, uerr)
 		}
-		seen[ev["type"]] = ev["name"] + ev["result"] + ev["error"]
+		seen[ev["type"]] = ev["name"] + ev["result"] + ev["error"] + ev["text"]
 	}
 	if seen["tool_start"] != "read" {
 		t.Errorf("a tool call should emit tool_start for the tool, got %q", seen["tool_start"])
@@ -402,7 +421,55 @@ func TestRunJSONToolEvents(t *testing.T) {
 	if !strings.Contains(seen["tool_end"], "file body") {
 		t.Errorf("tool_end should carry the tool result, got %q", seen["tool_end"])
 	}
-	if !strings.Contains(seen["error"], "max turns") {
-		t.Errorf("a failed run should end with an error event, got %q", seen["error"])
+	if _, ok := seen["done"]; !ok {
+		t.Errorf("a finalized run should end with a done event, got %v", seen)
+	}
+}
+
+// --format json surfaces provider reasoning tokens as reasoning events, ahead
+// of the reply text, so downstream tools can show thinking activity live.
+func TestRunJSONReasoning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"reasoning_content":"let me think"}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(srv.Close)
+
+	home := t.TempDir()
+	t.Setenv("WHIP_HOME", home)
+	cfg := fmt.Sprintf(`{
+		"defaultModel": "test",
+		"providers": {"testprov": {"baseUrl": %q, "api": "openai-completions", "apiKey": "k"}},
+		"models": {"test": {"providers": ["testprov"], "maxOut": 100}}
+	}`, srv.URL)
+	if err := os.WriteFile(filepath.Join(home, "config.json"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runCapture(t, "", "--format", "json", "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reasoning string
+	var sawText bool
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+		var ev map[string]string
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("line not JSON: %q: %v", line, err)
+		}
+		switch ev["type"] {
+		case "reasoning":
+			reasoning += ev["delta"]
+		case "text":
+			sawText = true
+		}
+	}
+	if reasoning != "let me think" {
+		t.Fatalf("want reasoning event with thinking tokens, got %q", reasoning)
+	}
+	if !sawText {
+		t.Fatalf("want a text event too, got:\n%s", out)
 	}
 }

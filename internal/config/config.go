@@ -172,6 +172,8 @@ type Config struct {
 	TaskModel       string `json:"taskModel,omitempty"`       // model subagents (the task tool) run on; "" = the built-in default
 	TaskProvider    string `json:"taskProvider,omitempty"`    // provider for the subagent model; "" = the model's default routing
 	Theme           string `json:"theme,omitempty"`           // "light", "dark", or "" (auto-detect at startup)
+	UIMode          string `json:"uiMode,omitempty"`          // "" (default whip look) or "opencode" (reproduces opencode's TUI palette/glyphs/logo)
+	Sidebar         *bool  `json:"sidebar,omitempty"`         // opencode-mode sidebar; nil = shown when the terminal is ≥120 cols, false = hidden at startup (ctrl+x b still toggles)
 	Mouse           *bool  `json:"mouse,omitempty"`           // false disables capture so native terminal selection works
 	Thinking        *bool  `json:"thinking,omitempty"`        // nil defaults to on; false hides reasoning tokens (ctrl+o)
 	CollapsePaste   *bool  `json:"collapsePaste,omitempty"`   // nil/false: pastes land verbatim; true collapses ≥3-line pastes into a [Pasted ~N lines] placeholder
@@ -301,6 +303,52 @@ func path() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "config.json"), nil
+}
+
+// Exists reports whether the config file is already on disk. Load creates it
+// when missing, so callers that want to detect a first run (the setup wizard)
+// must check Exists before Load.
+func Exists() bool {
+	p, err := path()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(p)
+	return err == nil
+}
+
+// setupDonePath is the marker the first-run wizard leaves when it completes.
+// The wizard triggers on "no config file AND no marker": any whip subcommand
+// (auth/run/mcp/…) that calls Load on a fresh install creates the config
+// without running the wizard, and the marker keeps that from permanently
+// consuming the first run.
+func setupDonePath() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "setup.done"), nil
+}
+
+// SetupDone reports whether the first-run wizard has completed (or a previous
+// version ran enough times to have one).
+func SetupDone() bool {
+	p, err := setupDonePath()
+	if err != nil {
+		return true // can't stat the marker: don't risk a surprise wizard
+	}
+	_, err = os.Stat(p)
+	return err == nil
+}
+
+// MarkSetupDone leaves the wizard-completed marker. Best-effort: a failed
+// write just means the wizard offers again next launch.
+func MarkSetupDone() {
+	p, err := setupDonePath()
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(p, []byte("ok\n"), 0o600)
 }
 
 // fingerprint summarizes a config for the operation log: enough to spot a

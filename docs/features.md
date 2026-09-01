@@ -70,6 +70,45 @@ Tests: `internal/tools/bashrun/feedback_test.go` — `TestOnUpdateThrottle`
 `internal/tui/tool_output_test.go` — `TestToolOutputMsgUpdatesRunningRow`
 (unknown id ignored, tail replaces, end clears), `TestLastLines`.
 
+### Waiting without polling (`wait` tool)
+
+`internal/agent/wait.go` — the `wait` tool replaces `sleep N && check` loops
+(which spend a full LLM turn per poll) with a **harness-owned poller**. The
+model names a shell command, an optional `until` regex, an interval (min 2s,
+default 10s) and a timeout (default 10m, max 1h); a goroutine re-runs the
+command via `bashrun` on the interval with zero model involvement.
+
+Exactly one message re-enters the loop when the wait resolves — never a poll
+per check. Delivery routes on whether a turn is in flight (`Agent.TurnRunning`
+— an `atomic.Bool` set at `turn()` entry/exit): **busy** → `Steer`, drained at
+the next loop boundary like any steered message; **idle** → the registry's
+`OnWake` hook, which the TUI installs (`wireWaits`, called from `wireTasks` so
+every agent swap re-installs it) to submit a machine-authored turn
+(`submitTurn(text, false)`), the opencode/exo wake pattern. A turn that starts
+between the `TurnRunning` check and the wake message is caught by the
+`waitWakeMsg` handler re-checking `m.busy` and steering instead of
+double-submitting. Headless idle (`whip run`, tests) has no loop boundary and
+no wake hook, so the message is dropped by design; the busy path is the one
+that matters there.
+
+Resolution states (`WaitStatus`): `condition met` (exit 0 and `until` regex
+matches, checked immediately on registration and then per interval), `timed
+out`, and `command failing` — 3 consecutive non-zero exits strike out the wait
+early (hermes' 3-strike lesson) so a broken command doesn't poll for the full
+timeout. Delivery is once-only (`atomic.Bool` CAS in `deliver`), `Done` closes
+on settle like `BackgroundTask`, and `CancelWait` suppresses a pending
+delivery. Waits are live-only: a dead process's waits die with it, and the
+registry's `Close` cancels every poller on agent teardown.
+
+The system prompt (`cmd/whip/main.go`) tells the model to prefer `wait` over
+`sleep` loops, and the tool's return message restates the no-poll contract.
+
+Tests: `internal/agent/wait_test.go` — `TestWaitConditionMetImmediately`,
+`TestWaitUntilRegex`, `TestWaitStrikesOut`, `TestWaitTimeout`,
+`TestWaitBusySteersInsteadOfWaking` (busy → Steer, not OnWake),
+`TestWaitCancel`, `TestWaitToolRegisters` (def parsing + settle).
+`go test -race ./internal/agent` green.
+
 ### Compaction
 
 When the conversation fills the context window, old turns fold into an
@@ -96,6 +135,17 @@ default isn't in the config.
 Token bookkeeping: `llm.Usage` (prompt/completion/cached) is read off the
 terminal stream chunk (`stream_options: include_usage`) and folded into session
 totals via `AddUsage`. Compaction and subagent calls count too.
+
+Every compaction is visible in the transcript as a pair of notes. The moment
+folding begins, `OnCompactStart` renders `◎ compacting N msgs (est. X tok) with
+<model>…` so the UI never looks hung during the summary call. When it
+completes, `OnCompacted` renders `◎ compacted — summarized N msgs, M kept ·
+<model> · $cost (in/out tok) · raw history preserved` — the counts come from
+`OnCompact`, the model and spend from `CompactInfo` (a dedicated compaction
+route is labeled `<id> @ <host>`), and the cost is priced off the provider
+catalog (hidden when the model has no advertised price). The result note
+renders even with no session store; the `raw history preserved` suffix appears
+only once the event is actually recorded.
 
 ### Provider prompt-prefix caching
 
@@ -132,9 +182,16 @@ threshold ←/→.
 Tests: `agent_test.go` — `TestTurnAutoCompactsOnContextLimit`,
 `TestCompactDoesNotLoopOnRepeatedContextLimit`, `TestCompactKeepsToolCallPair`,
 `TestProactiveCompactAtFiftyPercent`, `TestCompactThresholdExplicitOverride`,
-`TestUsageAccumulates`; `compact_cmd_test.go` —
+`TestCompactionEventsCarryModelAndUsage` (start fires before the summary call;
+done carries the model + usage, proven with a tiny context limit),
+`TestCompactionInfoLabelsDedicatedRoute`, `TestUsageAccumulates`;
+`compact_cmd_test.go` —
 `TestCompactModelEmptyResolvesDefault`, `TestCompactModelDefaultFallsBack`,
-`TestCompactThresholdFor`, `TestSetCompactPct`; `palette_test.go` —
+`TestCompactThresholdFor`, `TestSetCompactPct`; `compact_vis_test.go` —
+`TestCompactionVisibleInTranscript` (the start+result notes render through the
+Update loop with a small compaction limit),
+`TestCompactionNotesRenderInOrder`, `TestCompactionResultShowsRealCounts`;
+`palette_test.go` —
 `TestPaletteCompactPanelAppliesInPlace`,
 `TestPaletteCompactPanelDefaultRowRestores`, `TestPaletteCompactionLevelSteps`.
 
@@ -173,6 +230,32 @@ as a **steered message**, so the model sees it on the next loop boundary.
   The dock itself shows running tasks plus ones settled within a one-minute
   grace window (`dockSettledGrace`) — long enough to notice the ✓, then the
   strip cleans itself.
+- **Full transcript on open.** The registry journals every emitted event per
+  task (`taskJournal`, byte-capped at 128KB, drop-oldest with a "[earlier
+  output dropped]" marker). `openTask` replays the journal and subscribes to
+  the live stream as ONE atomic call (`SubscribeWithJournal`), so a detail
+  view opened mid-run or after settle shows the complete transcript — tool
+  calls, steers, and all — instead of only what streams in after attach.
+  Replay and live rendering share `renderTaskEvent` (internal/tui/tasks.go)
+  so the two paths can't drift in format. Tests: `journal_test.go`
+  (recording, delta coalescing, overflow truncation, atomicity under
+  concurrent emit, survive-settle/clear lifecycle),
+  `TestTaskViewReplaysJournal`, `TestRunningTaskViewReplaysThenStreams`.
+
+- **Full transcript persisted.** When a background subagent settles, its whole
+  conversation is saved as its own attributed session
+  (`Store.SaveSubagentTranscript`, id `task-<parentID>-<taskID>` — the
+  `task-` prefix avoids a prefix-collision with the parent id in `Load`),
+  with `forked_from` = the parent session and `task_id` = the task. A
+  follow-up turn on the settled subagent re-saves the transcript
+  (`refreshTranscript` after `FollowupTask`). On resume, opening a restored
+  task replays the persisted transcript read-only (`renderTranscript`) instead
+  of showing only the bare report — a crashed process no longer loses the
+  completed work. Tests: `session_test.go`
+  `TestSubagentTranscriptRoundTrip` (attribution + follow-up re-save + no-op
+  without a parent), `tasks_test.go`
+  `TestRestoredTaskReplaysPersistedTranscript` (kill → resume → open shows the
+  full transcript).
 
 Background tasks use a context **not** tied to the current turn — they outlive
 it by design. Cancelling a task cancels its subagent's turn. `settle()`
@@ -182,7 +265,9 @@ always sees the recorded final state.
 **Subagent model routing** (`internal/agent/subagent.go` `SubModel`,
 `internal/tui/taskmodel.go`): subagents default to the cheap fast
 `deepseek-v4-flash-0731` route (`config.DefaultTaskModel`, same default as
-compaction); config `taskModel`/`taskProvider` pins a different one; the main
+compaction); config `taskModel`/`taskProvider` pins a different one —
+ctrl+p › Subagent model sets it and persists to the global config (the
+picker's "default" row restores the built-in default); the main
 model overrides per call via the `subagent` tool's optional `model`/`provider`
 params. Resolution chain: taskModel → built-in default → catalog id ending in
 `/<default>` (openrouter-style vendor prefixes) → silently fall back to the
@@ -234,6 +319,11 @@ Tests: `TestBackgroundTaskDeliversReport`, `TestBackgroundTaskBroadcastsToManyWa
 (8 waiters all woken by one channel close), `TestBackgroundTaskCancel`;
 persistence: `session.TestTaskRoundTrip`, `TestRestoreTaskSettledAndVisible`,
 `TestResumeRestoresTasks`, `TestTaskPersistsOnStartAndSettle`;
+spawn feedback: `TestBackgroundWorktreeRegistersBeforeProvisioning` (the task
+registers — dock row + ⚙ badge — before the synchronous worktree provision
+runs, and the worktree path is baked into the subagent's initial prompt so
+it's delivered deterministically with the turn, never as a post-spawn steer a
+fast-settling task would lose);
 dock click hit-testing: `TestDockClickOpensClickedRow`,
 `TestDockClickIgnoredWhilePaletteOpen`; routing: `submodel_test.go` —
 `TestTaskModelOverride`, `TestTaskDefaultRoutesSubagents`,
@@ -283,6 +373,41 @@ provider `error` chunks and 4xxs (including context-limit, which the
 compaction path must see immediately) are never retried. Each retry posts a
 `⚠ request failed (…) — retrying in Ns (attempt N/M)` line via the
 `Client.OnRetry` hook. Tests: `llm/retry_test.go`.
+
+`internal/tui/setup.go` — the first-run setup wizard. When `whip` starts with
+no `~/.whip/config.json` AND no `~/.whip/setup.done` marker
+(`cmd/whip/main.go` checks `config.Exists()`/`config.SetupDone()` before
+`config.Load()` creates the config, and threads the flag into `tui.Run`), a
+short plain-terminal wizard runs after the trust gate and before bubbletea
+takes the terminal — the `checkTrust` pattern, one question per line. The
+marker matters: a subcommand's `config.Load` (`whip auth`/`run`/`mcp`) writes
+the default config without running the wizard, and without the marker that
+would permanently consume the first run. `tui.Run` shares one `bufio.Reader`
+between the trust gate and the wizard — a fresh reader per prompt would lose
+the other's buffered read-ahead when a paste answers several prompts at once.
+
+1. **Provider** — `[1] Inference.net (browser sign-in) · [2] OpenRouter
+   (paste key) · [3] skip`, Enter = skip. `1` runs the device login through
+   `inferencenet.CompleteLogin` with a numbered-list `ChooseFunc` standing in
+   for the TUI picker, then mints the machine key and upserts the provider.
+   `2` validates the pasted key against OpenRouter's `/models` (the
+   `openRouterValidate` seam — an httptest stub in tests) before
+   `UpsertOpenRouter` writes anything. A failed sign-in or bad paste never
+   wedges install: the wizard prints the error and continues.
+2. **Thinking tokens** — `[Y/n]`, Enter = show (today's default; "n" writes
+   `"thinking": false`).
+3. **MCP imports** — claude (`~/.claude.json`, `.mcp.json`) and codex
+   (`~/.codex/config.toml`), both `[y/N]` — Enter = **no**: a first run that
+   only presses Enter imports nothing. The answers always land in the
+   `mcpImport` block as explicit `enabled: bool`s so the install has a
+   record, and ctrl+p → MCPs flips them later.
+
+Non-terminal stdin (piped runs, `whip run`, ACP, tests) skips the wizard
+silently and keeps the shipped defaults — headless launches never see a
+prompt. All writes go through the guarded `Config.Save`. Tests:
+`tui/setup_test.go` (`askYN` parsing incl. EOF/garbage fallback,
+Enter-through opt-out, opt-in, thinking-off persistence, OpenRouter good/bad
+key via the injected validator).
 
 `cmd/whip/auth.go`, `internal/config/openrouter.go`,
 `internal/tui/auth_cmd.go` — one-command provider onboarding, first (and
@@ -379,6 +504,21 @@ relay: full device login + key mint, store round-trip, key validation),
 - Queueing (enter while busy), steering (empty enter), history recall (↑/↓),
   `@file` mentions, `$skill` invocation, `/goal` loop, `/resume` session
   picker, `/effort` reasoning levels — see the roadmap for the full list.
+- **Typing steers a turn that's only waiting on subagents.** When a turn is
+  running but its only in-flight tool calls are subagents
+  (`Agent.WaitingOnSubagents` — the agent tracks in-flight tool names in
+  `runTools`), typed input routes to `Agent.Steer` instead of the busy queue:
+  it reaches the model at the next loop boundary as a mid-turn correction
+  rather than queueing behind the whole turn (waiting on a subagent isn't real
+  work the message would interrupt). Any other in-flight tool (a bash, an
+  edit) keeps the queue behavior. The input placeholder reflects the routing
+  live (`syncInputPlaceholder`, consulted in `View`): "waiting on subagents —
+  type to steer this turn" vs "busy — type to queue". Tests:
+  `internal/agent/busysteer_test.go` (`TestInFlightToolsTracking`,
+  `TestWaitingOnSubagentsGating`,
+  `TestWaitingOnSubagentsDuringForegroundSubagent` — a real turn blocked on a
+  live foreground subagent reports waiting, then flips false),
+  `internal/tui/queue_test.go` (`TestBusyPlaceholderReflectsRouting`).
 - **Settings commands run mid-turn.** `/theme`, `/mouse`, `/effort`, `/subagents` (alias `/tasks`),
   `/help`, `/cd`, `/pwd`, and the non-submitting `/goal` forms (bare, `clear`,
   `rounds`) execute immediately while busy instead of queueing — queued text
@@ -505,6 +645,31 @@ expand from whip's environment.
 - **TUI** — `/mcp` shows the status table (`● N tools` / `✗ err` /
   `○ disabled` / `◌ connecting…`); `/mcp <name> reconnect|enable|disable`
   reconnects live or persists a toggle through the guarded `Config.Save`.
+- **Palette panel** — ctrl+p → "MCPs" drills into a sub-panel (the `panelMCP`
+  kind) with two source-toggle rows (`Import Claude MCPs`, `Import Codex
+  MCPs`) then one row per live or policy-blocked server. enter/←/→ toggles:
+  source rows go through `mcpSetImport`, server rows through the same
+  `mcpSetEnabled` as `/mcp`. Toggling rebuilds the rows in place so the
+  checkbox flips visibly. A source with `only`/`exclude` filters notes
+  "(name filters set — edit config)" instead of pretending the toggle is
+  complete.
+- **Live source toggles, no restart** — `mcpSetImport` persists the gate then
+  applies it in place: off calls `Manager.RemoveServers` (sessions close, the
+  gen bump stops auto-reconnect and stale watchers, tools leave
+  `Agent.SetMCPTools` on the next `fireOnChange`); on calls
+  `Manager.AddServers` (lazy-with-kickoff connects like startup, skipped for
+  names already live so whip-owned shadow entries win). Both refresh
+  `SetBlocked` so `/mcp` stays accurate. With no manager yet (nothing
+  configured), enabling builds one on the spot so imports can be switched on
+  from zero. Every `Manager.servers` map read (Tools/Statuses/Config/Disable/
+  Enable/Reconnect/InstructionsBlock/Close) takes `onChangeMu` — the same
+  lock that guards AddServers/RemoveServers mutations — so a mid-turn toggle
+  never races the slice a running request reads. Source attribution matches
+  BOTH shapes: `Filtered.Sources` uses short labels (`"codex"`,
+  `".mcp.json"`) while the live manager's `Statuses()` carry the absolute
+  discovery path — `isSource` in `tui/mcp.go` normalizes both, and a
+  remove-mid-connect is guarded by `connect`'s `startGen`/`stillOurs` check
+  so a toggled-off server's in-flight connect can't resurrect it.
 - **CLI** — `whip mcp list` (merged view with per-name source labels —
   `whip config` / `.mcp.json` / `codex config` — and a `blocked` state),
   `whip mcp add <name> -- <cmd...>` / `--url`, `whip mcp remove`,
@@ -559,6 +724,13 @@ a fake provider; stale def on a dead server returns `"Error: …"` and the turn
 completes), `selfhost_test.go` (`whip mcp serve` end-to-end, gated on
 `WHIP_TEST_SELFHOST=1`), `tui/mcp_test.go` (status view incl. blocked rows,
 toggle persistence round-trip, enable-on-blocked refusal),
+`tui/mcp_panel_test.go` (row assembly, palette-driven source toggle off →
+server gone + gate persisted + whip-owned entries untouched, enable → live
+re-discovery, only/exclude filters survive a toggle, panel row replaces the
+old run-row), `manager_live_test.go` (`AddServers` connects a late server,
+duplicate add no-ops, `RemoveServers` drops tools immediately, remove-
+while-connecting + concurrent readers race-clean, stale tool closure fails
+as an error string, remove-then-add reconnects),
 `config/config_test.go` (mcpImport JSONC round-trip, clobber recovery
 preserving the block), `cmd/whip/mcp_import_test.go` (import dry-run vs
 apply, idempotence, blocked servers never imported).
@@ -670,12 +842,12 @@ auto-installing servers.
 
 ## Skills
 
-`internal/skills/skills.go` — scans `.agents/skills/*/SKILL.md` (project) and
-`~/.whip/skills/` (user) for a name+description frontmatter block, injected
-into the system prompt as an `<available_skills>` catalog in the Agent Skills
-spec format (`<skill><name>/<description>/<location>`, XML-escaped). The model
-reads a SKILL.md with its own read tool when relevant. Skills re-index every
-turn, so new ones load without restarting.
+`internal/skills/skills.go` — scans `.agents/skills/*/SKILL.md` (project),
+`~/.whip/skills/`, and `~/.agents/skills/` (user) for a name+description
+frontmatter block, injected into the system prompt as an `<available_skills>`
+catalog in the Agent Skills spec format (`<skill><name>/<description>/<location>`,
+XML-escaped). The model reads a SKILL.md with its own read tool when relevant.
+Skills re-index every turn, so new ones load without restarting.
 
 **Spec compliance** (agentskills.io, matching pi's `core/skills.ts`): name
 validated (≤64 chars, lowercase a-z/0-9/hyphens, no leading/trailing/double
@@ -823,6 +995,31 @@ environment quirk, not a rod/whip bug; verified on real Chrome.
 
 The browser-use CLI-over-MCP escape hatch remains available via config for
 anyone wanting the Python ecosystem (§4 option B).
+
+## `whip up <prompt>` — start the TUI with a first-turn prompt from argv
+
+`whip up <words...>` (`cmd/whip/main.go`) joins every argv token after `up`
+with spaces and opens the interactive TUI with that text submitted as the
+first user turn — the exact typed-submission path (`submitTurn`,
+`Authored: true`), so it lands in up-arrow input history and the transcript.
+Flags still work because Go's `flag` package stops parsing at `up`
+(`whip -m kimi up do the thing`), and the prompt itself may start with `-`
+untouched — the `up` handler never re-parses its args.
+
+The prompt rides the `model.initialPrompt` field into the session; `Init()`
+emits a one-shot `initialPromptMsg` (batched with the textarea blink) and
+`Update` submits it. Kicking off from `Init` — not from `Run` before
+`tea.NewProgram` — is the load-bearing choice: the turn goroutine's event
+callbacks `p.Send` through `m.prog`, which only exists once the program is
+constructed. Combined with `--resume` the replayed history renders first and
+the prompt fires as the next turn, matching `whip run`'s
+prompt-after-resume order.
+
+Tests: `internal/tui/up_test.go` — `TestInitialPromptSubmitsFirstTurn` (Init
+kickoff → busy turn, authored user message, history entry, one-shot
+consumption), `TestNoInitialPromptNoKickoff` (bare blink Init, empty msg is
+a no-op), `TestInitialPromptMsgIgnoredWhileBusy` (a replayed msg can't
+double-submit mid-turn).
 
 ## ACP agent mode
 

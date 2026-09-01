@@ -1,7 +1,9 @@
 // `whip run` — non-interactive (headless) mode: one turn of the agent with
 // no TUI and no trust prompt, for trusted automation and scripting. Piped
 // stdin is appended to the prompt. --format json emits the raw event stream
-// as newline-delimited JSON; the final event is {"type":"done",...} or
+// as newline-delimited JSON: {"type":"reasoning","delta":...} for thinking
+// tokens, {"type":"text","delta":...} for reply text, {"type":"tool_start"/
+// "tool_end",...} for tool calls; the final event is {"type":"done",...} or
 // {"type":"error",...}. Exit code 0 on success, 1 on error.
 package main
 
@@ -16,6 +18,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/context-labs/whip/internal/agent"
 	"github.com/context-labs/whip/internal/config"
@@ -32,7 +35,7 @@ func runCLI(args []string) error {
 	resumeFlag := fs.String("resume", "", "continue this session id (see `whip sessions`) instead of starting fresh")
 	systemFlag := fs.String("system", "", "override the system prompt for this run")
 	systemFileFlag := fs.String("system-file", "", "read the system prompt from this file (wins over -system)")
-	maxTurnsFlag := fs.Int("max-turns", 0, "cap the tool-call loop at N rounds (0 = uncapped); a capped run exits non-zero")
+	maxTurnsFlag := fs.Int("max-turns", 0, "cap the tool-call loop at N rounds (0 = uncapped); on the cap, the model makes one final no-tools answer instead of erroring")
 	timeoutFlag := fs.Duration("timeout", 0, "wall-clock cap on the whole run (e.g. 30s, 5m); 0 = no timeout")
 	quietFlag := fs.Bool("quiet", false, "suppress the stderr tool/session notes (clean stdout for -format json piping)")
 	noSessionFlag := fs.Bool("no-session", false, "run without persisting a session (one-off jobs don't clutter whip sessions)")
@@ -96,7 +99,7 @@ func runCLI(args []string) error {
 
 	// System prompt: -system-file wins over -system (a file is the deliberate
 	// choice; a stray -system alongside it is almost certainly stale).
-	sys := systemPrompt(cwd())
+	sys := systemPrompt(cwd(), time.Now())
 	if *systemFlag != "" {
 		sys = *systemFlag
 	}
@@ -172,6 +175,9 @@ func runCLI(args []string) error {
 			}
 		}
 		ev.OnText = func(d string) { emit(map[string]string{"type": "text", "delta": d}) }
+		ev.OnThink = func(d string) {
+			emit(map[string]string{"type": "reasoning", "delta": d})
+		}
 		ev.OnToolStart = func(_, name, args string) {
 			emit(map[string]string{"type": "tool_start", "name": name, "args": args})
 		}

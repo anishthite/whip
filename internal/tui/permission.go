@@ -88,8 +88,8 @@ func (m *model) installPermGate() {
 			return tools.GateAllowOnce, "" // headless: no one to ask
 		}
 		reply := make(chan permAnswer, 1)
-		m.prog.Send(permRequest{req: req, reply: reply})
-		ans := <-reply // block the tool goroutine until the user answers
+		m.prog.Send(permRequest{req: req, reply: reply}) //nolint:uilock // background: the calling tool goroutine, which blocks on reply — never the event loop
+		ans := <-reply                                   // block the tool goroutine until the user answers
 		return ans.decision, ans.redirect
 	}
 }
@@ -191,7 +191,7 @@ func (m *model) permView() string {
 	b.WriteString("\n  ")
 	for i, o := range opts {
 		if i == d.sel {
-			b.WriteString(youStyle.Render("❯ " + o + "  "))
+			b.WriteString(youStyle.Render(glyphUser + o + "  "))
 		} else {
 			b.WriteString(dimStyle.Render("  " + o + "  "))
 		}
