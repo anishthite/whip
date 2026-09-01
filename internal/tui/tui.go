@@ -532,14 +532,14 @@ func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string, ca
 // servers — plus degraded-mode notices. Skipped on resume (the transcript
 // already carries the past).
 func (m *model) startupReport() {
-	if m.uiMode == opencodeMode {
-		// opencode keeps the startup clean; the logo shows as the empty-state home
-		// screen. But an unknown background means the panels render with no fill —
-		// zero contrast — so say why and how to fix it instead of failing silently.
-		if !ocThemeKnown() {
-			m.append(dimStyle.Render("◐ terminal background unknown — panels have no contrast; run /theme light (or dark) once to fix (mosh blocks background detection)"))
-		}
-		return
+	// opencode mode keeps the startup clean (quiet): the routine roster lines
+	// are suppressed, but actionable items — skill-scan warnings, failed MCP
+	// servers, the update notice — must still surface, never silently drop.
+	quiet := m.uiMode == opencodeMode
+	if quiet && !ocThemeKnown() {
+		// an unknown background means the panels render with no fill — zero
+		// contrast — so say why and how to fix it instead of failing silently
+		m.append(dimStyle.Render("◐ terminal background unknown — panels have no contrast; run /theme light (or dark) once to fix (mosh blocks background detection)"))
 	}
 	sk, problems := skills.ScanDetailed(skills.DefaultDirs()...)
 	var b strings.Builder
@@ -548,7 +548,7 @@ func (m *model) startupReport() {
 	line := func(format string, args ...any) {
 		fmt.Fprintf(&b, format+"\n", args...)
 	}
-	if len(sk) > 0 {
+	if len(sk) > 0 && !quiet {
 		line("skills: %d loaded", len(sk))
 	}
 	for _, s := range sk {
@@ -563,19 +563,23 @@ func (m *model) startupReport() {
 	}
 	if m.mcpMgr != nil {
 		sts := m.mcpMgr.Statuses()
-		var parts []string
+		var parts, failed []string
 		for _, st := range sts {
 			switch st.Status {
 			case mcp.StatusReady:
 				parts = append(parts, fmt.Sprintf("%s ✓ (%d tools)", st.Name, st.Tools))
 			case mcp.StatusFailed:
 				parts = append(parts, st.Name+" ✗")
+				failed = append(failed, st.Name+" ✗")
 				warned = true
 			case mcp.StatusDisabled:
 				parts = append(parts, st.Name+" ○")
 			default:
 				parts = append(parts, st.Name+" ◌")
 			}
+		}
+		if quiet {
+			parts = failed // quiet startup: only broken servers are worth a line
 		}
 		if len(parts) > 0 {
 			line("mcp: %s", strings.Join(parts, " · "))
@@ -2081,6 +2085,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		result := block{kind: blockTool, text: msg.result}
 		if hdr >= 0 && hdr+1 < len(m.blocks) {
 			m.blocks = append(m.blocks[:hdr+1], append([]block{result}, m.blocks[hdr+1:]...)...)
+			// the mid-slice insert shifted every index past hdr: renumber the
+			// cached block indexes or rewind scrolls to (and Message Actions
+			// copies from) the wrong block
+			for i := range m.msgBlock {
+				if m.msgBlock[i] > hdr {
+					m.msgBlock[i]++
+				}
+			}
+			if m.hoverIdx > hdr {
+				m.hoverIdx++
+			}
+			if m.msgActions != nil && m.msgActions.block > hdr {
+				m.msgActions.block++
+			}
 		} else {
 			m.blocks = append(m.blocks, result)
 		}
@@ -3888,6 +3906,9 @@ func (m *model) command(text string) (tea.Model, tea.Cmd) {
 		// rather than tea.EnableMouseCellMotion.
 		if m.mouseOn {
 			enableClickWheelMouse(os.Stdout)
+			if m.uiMode == opencodeMode {
+				fmt.Fprint(os.Stdout, "\x1b[?1003h") // hover needs all-motion; ?1002 alone downgraded it
+			}
 		} else {
 			disableClickWheelMouse(os.Stdout)
 		}

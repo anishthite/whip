@@ -189,6 +189,68 @@ func TestOcToolResult(t *testing.T) {
 	if e := ocToolResult(lines, false, true, false, 80); !strings.Contains(e, "↳ 3 lines") {
 		t.Fatalf("error collapsed = %q", e)
 	}
+	if h := ocToolResult(lines, false, false, true, 80); !strings.Contains(h, "↳ 3 lines") {
+		t.Fatalf("hover collapsed = %q", h) // hover brightens the hint but keeps the text
+	}
+}
+
+// TestApplyUIModeRuntimeMouseToggle: a LIVE mode switch (tuiRunning) must arm
+// ?1003 all-motion tracking on entry and drop it on exit — Run's own ?1003h
+// only covers sessions that start in opencode mode — and exit must clear any
+// hover highlight the tracked motion left behind.
+func TestApplyUIModeRuntimeMouseToggle(t *testing.T) {
+	saved := tuiRunning
+	t.Cleanup(func() { tuiRunning = saved; ocActive = false })
+	tuiRunning = true
+
+	// capture what applyUIMode writes to the terminal
+	r, w, _ := os.Pipe()
+	stdout := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = stdout }()
+
+	m := &model{input: newInput(), mouseOn: true}
+	m.blocks = []block{{kind: blockAssistant, hover: true}}
+	m.hoverIdx = 0
+	m.applyUIMode(opencodeMode)
+	m.applyUIMode("")
+	w.Close()
+	os.Stdout = stdout
+	buf := make([]byte, 64)
+	n, _ := r.Read(buf)
+	out := string(buf[:n])
+	if !strings.Contains(out, "\x1b[?1003h") || !strings.Contains(out, "\x1b[?1003l") {
+		t.Fatalf("runtime toggle should emit ?1003h then ?1003l, got %q", out)
+	}
+	if m.hoverIdx != -1 || m.blocks[0].hover || !m.blocks[0].stale {
+		t.Fatalf("exit should clear the hover highlight: hoverIdx=%d hover=%v stale=%v",
+			m.hoverIdx, m.blocks[0].hover, m.blocks[0].stale)
+	}
+}
+
+// TestToolEndRenumbersCaches: the mid-slice result insert shifts every block
+// past the header — the msgBlock map, hover index, and an open Message
+// Actions dialog must all follow or they point one block short.
+func TestToolEndRenumbersCaches(t *testing.T) {
+	m := tasksModel("http://unused")
+	m.blocks = []block{
+		{kind: blockUser, text: "hi"},
+		{kind: blockToolRun, toolRunning: true, toolID: "c1", toolName: "bash"},
+		{kind: blockAssistant, text: "done"},
+	}
+	m.msgBlock = []int{0, 2}
+	m.hoverIdx = 2
+	m.msgActions = &msgActions{block: 2}
+	m.Update(toolEndMsg{id: "c1", name: "bash", result: "ok"})
+	if m.blocks[2].kind != blockTool {
+		t.Fatalf("result should insert directly under its header, got kind %d", m.blocks[2].kind)
+	}
+	if m.msgBlock[0] != 0 || m.msgBlock[1] != 3 {
+		t.Fatalf("msgBlock not renumbered: %v", m.msgBlock)
+	}
+	if m.hoverIdx != 3 || m.msgActions.block != 3 {
+		t.Fatalf("hover/dialog indexes not renumbered: hover=%d dialog=%d", m.hoverIdx, m.msgActions.block)
+	}
 }
 
 func TestVpTopRowsAndXOff(t *testing.T) {

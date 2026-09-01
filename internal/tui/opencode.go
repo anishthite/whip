@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"math/rand/v2"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -1043,6 +1044,11 @@ func (m *model) applyUIMode(mode string) {
 		m.input.FocusedStyle.Placeholder = dimStyle.Background(ocElementBg())
 		m.input.BlurredStyle.Text = elem
 		m.input.BlurredStyle.Placeholder = dimStyle.Background(ocElementBg())
+		if tuiRunning && m.mouseOn {
+			// a runtime toggle INTO opencode mode must arm all-motion tracking
+			// itself — Run's ?1003h only covers sessions that start here
+			fmt.Fprint(os.Stdout, "\x1b[?1003h")
+		}
 	} else {
 		m.uiMode = ""
 		ocActive = false
@@ -1054,6 +1060,14 @@ func (m *model) applyUIMode(mode string) {
 		m.input.FocusedStyle.Placeholder = dimStyle
 		m.input.BlurredStyle.Text = lipgloss.NewStyle()
 		m.input.BlurredStyle.Placeholder = dimStyle
+		if tuiRunning && m.mouseOn {
+			fmt.Fprint(os.Stdout, "\x1b[?1003l") // drop all-motion tracking with the mode
+		}
+		// clear any stuck hover highlight left behind by the mode switch
+		if m.hoverIdx >= 0 && m.hoverIdx < len(m.blocks) {
+			m.blocks[m.hoverIdx].hover, m.blocks[m.hoverIdx].stale = false, true
+		}
+		m.hoverIdx = -1
 	}
 	// The textarea reads styles through a pointer snapshotted at Focus() time
 	// (style = &m.FocusedStyle). The struct has been copied since newInput's
