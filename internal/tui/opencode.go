@@ -688,10 +688,10 @@ func (m *model) ocModelDialogRows() []string {
 	p := m.mpicker
 	k := m.newOcBox()
 	rows := []string{k.blank, k.lr(k.head.Render("Select model"), k.muted.Render("esc")), k.blank}
-	if p.query == "" {
+	if p.filter.query == "" {
 		rows = append(rows, k.lr(k.muted.Render("Search"), ""))
 	} else {
-		rows = append(rows, k.lr(k.text.Render(p.query), ""))
+		rows = append(rows, k.lr(k.text.Render(p.filter.query), ""))
 	}
 	rows = append(rows, k.blank)
 

@@ -324,12 +324,12 @@ func TestOcModelDialogRows(t *testing.T) {
 			t.Fatalf("model dialog missing %q:\n%s", want, out)
 		}
 	}
-	m.mpicker.query = "kimi"
+	m.mpicker.filter.query = "kimi"
 	if out := strings.Join(m.ocModelDialogRows(), "\n"); strings.Contains(out, "Search") || !strings.Contains(out, "kimi") {
 		t.Fatalf("query should replace Search:\n%s", out)
 	}
 	m.mpicker.items = nil
-	m.mpicker.query = ""
+	m.mpicker.filter.query = ""
 	if out := strings.Join(m.ocModelDialogRows(), "\n"); !strings.Contains(out, "No results found") {
 		t.Fatal("empty model dialog should say No results found")
 	}
