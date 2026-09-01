@@ -263,7 +263,14 @@ type model struct {
 	// infAuth holds the in-flight inference-net device login across the
 	// team → project → create prompts.
 	infAuth *inferenceNetPending
+
+	// initialPrompt (whip up <words>) is submitted as the first turn from
+	// Init — late enough that m.prog exists for the turn goroutine's p.Send.
+	initialPrompt string
 }
+
+// initialPromptMsg is Init's one-shot kickoff of a `whip up` first turn.
+type initialPromptMsg struct{}
 
 // picker is the /resume session browser. metas is newest-first; the list is
 // rendered oldest-at-top so newest sits at the bottom.
@@ -318,7 +325,9 @@ var (
 // was active on exit ("" if nothing was said). firstRun reports the config
 // file did not exist at startup (the caller checks config.Exists before
 // config.Load creates it) and triggers the one-time setup wizard.
-func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string, cautious, firstRun bool) (string, error) {
+// initialPrompt (`whip up <words>`) is submitted as the first turn once the
+// UI is up — after any resume replay, matching `whip run`'s order.
+func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string, cautious, firstRun bool, initialPrompt string) (string, error) {
 	// One shared stdin reader for the pre-TUI prompts: a bufio.Reader reads
 	// ahead, so separate readers for the trust gate and the setup wizard would
 	// lose buffered answers (a pasted "y\n2\n…\n" answers both).
@@ -381,7 +390,8 @@ func Run(cfg *config.Config, modelName, provName, sysPrompt, resumeID string, ca
 		catalogs: config.LoadCatalogs(), mouseOn: mouseOn, now: time.Now, showThinking: showThinking,
 		sidebarHide:  sidebarHide,
 		compactModel: cfg.CompactModel, compactProv: cfg.CompactProvider,
-		skillScan: func() []skills.Skill { return skills.Scan(skills.DefaultDirs()...) },
+		skillScan:     func() []skills.Skill { return skills.Scan(skills.DefaultDirs()...) },
+		initialPrompt: initialPrompt,
 	}
 	m.applyCompactModel()
 	m.applyTaskModel()
@@ -1412,13 +1422,18 @@ func (m *model) viewportView() string {
 }
 
 func (m *model) Init() tea.Cmd {
+	cmds := []tea.Cmd{textarea.Blink}
 	if inTmuxEnv() {
 		// live theme tracking: tmux knows the outer terminal's light/dark
 		// (#{client_theme}, via the 996/2031 protocol) — poll it so an OS
 		// appearance flip mid-session is picked up without a restart
-		return tea.Batch(textarea.Blink, themePollTick())
+		cmds = append(cmds, themePollTick())
 	}
-	return textarea.Blink
+	if m.initialPrompt != "" {
+		// Batch blink with the kickoff; the turn's p.Send is nil-safe in headless tests.
+		cmds = append(cmds, func() tea.Msg { return initialPromptMsg{} })
+	}
+	return tea.Batch(cmds...)
 }
 
 // themePollMsg fires the periodic client-theme poll; themeSyncMsg carries its
@@ -1785,6 +1800,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch msg := msg.(type) {
+	case initialPromptMsg:
+		if m.initialPrompt == "" || m.busy {
+			return m, nil
+		}
+		text := m.initialPrompt
+		m.initialPrompt = "" // one-shot: no re-submit on replays
+		m.hist = append(m.hist, text)
+		m.histIdx = len(m.hist)
+		return m.submit(text)
+
 	case cfgSyncTick:
 		return m.cfgSync()
 
