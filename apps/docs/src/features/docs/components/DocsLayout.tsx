@@ -152,9 +152,10 @@ const styles = stylex.create({
 
 export function DocsSidebar({ entries, current }: { entries: readonly DocMeta[]; current?: DocMeta }) {
   const nav = stylex.props(styles.navigation);
-  return <nav aria-label="Documentation" {...nav} className={`docs-navigation ${nav.className}`}>{sections.map((section, index) => <div {...stylex.props(index > 0 && styles.sidebarGroupSpacing)} key={section.id}>
+  const populated = sections.map((section) => ({ section, items: entries.filter(entry => entry.section === section.id).sort((a, b) => a.order - b.order) })).filter(group => group.items.length > 0);
+  return <nav aria-label="Documentation" {...nav} className={`docs-navigation ${nav.className}`}>{populated.map(({ section, items }, index) => <div {...stylex.props(index > 0 && styles.sidebarGroupSpacing)} key={section.id}>
     <div {...stylex.props(text.label, styles.sidebarLabel)} className={`sidebar-label ${stylex.props(text.label, styles.sidebarLabel).className}`}>{section.label}</div>
-    {entries.filter(entry => entry.section === section.id).sort((a, b) => a.order - b.order).map(entry => <SidebarItem key={entry.path} href={`/docs/${entry.path}`} active={current?.path === entry.path}>{entry.navTitle ?? entry.title}</SidebarItem>)}
+    {items.map(entry => <SidebarItem key={entry.path} href={`/docs/${entry.path}`} active={current?.path === entry.path}>{entry.navTitle ?? entry.title}</SidebarItem>)}
   </div>)}</nav>;
 }
 

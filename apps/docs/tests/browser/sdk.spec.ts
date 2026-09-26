@@ -2,7 +2,9 @@ import { test, expect } from '@playwright/test'
 
 const sections = ['Availability and installation', 'Connect to a host', 'Submit work', 'Events and cancellation', 'Define agents and tools', 'State views and React']
 
-test('SDK reference renders complete highlighted examples and preserves copied code', async ({ page, context }) => {
+// The TypeScript SDK page is currently a draft (draft: true in frontmatter), so it is
+// not published. These tests are skipped until the page is published again.
+test.skip('SDK reference renders complete highlighted examples and preserves copied code', async ({ page, context }) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write'])
   await page.goto('/docs/typescript-sdk')
   const article = page.locator('article')
@@ -23,7 +25,7 @@ test('SDK reference renders complete highlighted examples and preserves copied c
   await expect(page).toHaveURL('/docs/typescript-sdk#state-views-and-react')
 })
 
-for (const width of [320, 1440]) test(`SDK examples are readable without JavaScript at ${width}px`, async ({ browser }) => {
+for (const width of [320, 1440]) test.skip(`SDK examples are readable without JavaScript at ${width}px`, async ({ browser }) => {
   const context = await browser.newContext({ javaScriptEnabled: false, viewport: { width, height: 900 } })
   const page = await context.newPage()
   await page.goto('http://127.0.0.1:3101/docs/typescript-sdk')

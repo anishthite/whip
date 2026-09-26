@@ -62,9 +62,9 @@ test('active sidebar text retains the inactive font weight in both themes', asyn
 
 test('sidebar links remain real navigation', async ({ page }) => {
   await page.goto('/docs/download')
-  await page.locator('.docs-sidebar').getByRole('link', { name: 'Configuration', exact: true }).click()
-  await expect(page).toHaveURL('/docs/configuration')
-  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Configuration')
+  await page.locator('.docs-sidebar').getByRole('link', { name: 'FAQ', exact: true }).click()
+  await expect(page).toHaveURL('/docs/faq')
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('FAQ')
 })
 
 test('copy rejection provides visible manual-copy recovery', async ({ page }) => {
