@@ -8,7 +8,9 @@ const origin = process.argv[2] || 'http://127.0.0.1:3103'
 const base = '/whipcode'
 const site = docsSite()
 assert(site.origin, 'Set DOCS_ENVIRONMENT=production or preview')
-const docs = await loadDocuments()
+const documents = await loadDocuments()
+const docs = documents.filter(doc => !doc.draft)
+const drafts = documents.filter(doc => doc.draft)
 for (const route of [base, base + '/', base + '/docs', base + '/docs/quickstart/', base + '/docs/quickstart.html', base + '/docs/quickstart/index.html']) {
   const response = await fetch(origin + route, { redirect: 'manual' })
   assert.equal(response.status, 308, route)
@@ -22,6 +24,12 @@ assert.equal(query.headers.get('location'), base + '/docs/quickstart?ref=smoke')
 for (const route of ['/missing', '/docs/troubleshooting', '/404', '/404.html', '/404/index.html', '/dist/server/server.js', '/src/router.tsx']) {
   assert.equal((await fetch(origin + base + route)).status, 404, route)
 }
+for (const doc of drafts) {
+  for (const suffix of ['', '/', '.html', '/index.html']) {
+    const route = `${base}/docs/${doc.path}${suffix}`
+    assert.equal((await fetch(origin + route)).status, 404, `Draft must not be published: ${route}`)
+  }
+}
 assert.equal((await fetch(origin + base + '/docs/quickstart', { method: 'POST' })).status, 405)
 const head = await fetch(origin + base + '/docs/quickstart', { method: 'HEAD' })
 assert.equal(head.status, 200)
@@ -33,7 +41,8 @@ const sitemapResponse = await fetch(origin + base + '/sitemap.xml')
 if (site.indexable) {
   assert.equal(sitemapResponse.status, 200)
   const sitemap = await sitemapResponse.text()
-  for (const doc of docs) assert(sitemap.includes(`${site.origin}/docs/${doc.path}`))
+  for (const doc of docs) assert(sitemap.includes(`<loc>${site.origin}/docs/${doc.path}</loc>`))
+  for (const doc of drafts) assert(!sitemap.includes(`<loc>${site.origin}/docs/${doc.path}</loc>`), `Draft in sitemap: ${doc.path}`)
 } else assert.equal(sitemapResponse.status, 404)
 
 const browser = await chromium.launch()
@@ -54,7 +63,11 @@ try {
       assert.equal(await page.locator('h1').textContent(), doc.title)
       assert.equal(await page.locator('meta[name="robots"]').getAttribute('content'), site.indexable ? 'index,follow' : 'noindex,nofollow')
       assert.equal(await page.locator('link[rel="canonical"]').getAttribute('href'), `${site.origin}/docs/${doc.path}`)
-      for (const href of await page.locator('a[href^="/"]').evaluateAll(nodes => nodes.map(node => node.getAttribute('href')))) assert(href.startsWith(base + '/'), href)
+      for (const href of await page.locator('a[href^="/"]').evaluateAll(nodes => nodes.map(node => node.getAttribute('href')))) {
+        assert(href.startsWith(base + '/'), href)
+        const pathname = new URL(href, origin).pathname
+        assert(!drafts.some(doc => pathname === `${base}/docs/${doc.path}`), `Link to draft: ${href}`)
+      }
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), doc.path + ': overflow')
     }
     await page.goto(origin + base)
@@ -78,4 +91,4 @@ try {
     await context.close()
   }
 } finally { await browser.close() }
-console.log(`Worker smoke passed: ${docs.length} pages, JS/no-JS, links, themes, mobile navigation, assets, redirects and status codes at ${origin}${base}`)
+console.log(`Worker smoke passed: ${docs.length} published pages, ${drafts.length} excluded drafts, JS/no-JS, links, themes, mobile navigation, assets, redirects and status codes at ${origin}${base}`)
