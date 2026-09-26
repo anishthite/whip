@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test'
 
 const desktopUrl = 'https://github.com/context-labs/whip/releases/download/v1.0.0-alpha.5/Whip-Beta-1.0.0-alpha.5-arm64.dmg'
-const installCommand = 'curl -fsSL https://raw.githubusercontent.com/context-labs/whip/main/install.sh'
+const installCommand = 'curl -fsSL https://raw.githubusercontent.com/context-labs/whip/main/install.sh | sh'
 
 test('quickstart is the installation-first docs entry', async ({ page, context }) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write'])
@@ -9,7 +9,7 @@ test('quickstart is the installation-first docs entry', async ({ page, context }
   await expect(page).toHaveURL('/docs/quickstart')
   const article = page.locator('article')
   await expect(page.locator('.page-lead')).toContainText('RLM-based AI coding agent')
-  await expect(article.locator('h2')).toHaveText(['TUI', 'Desktop', 'Web', 'Customize'])
+  await expect(article.locator('h2')).toHaveText(['TUI', 'Desktop', 'Web'])
   await expect(page.locator('.docs-sidebar .sidebar-item').first()).toHaveText('Quickstart')
   await expect(page.locator('.docs-sidebar').getByRole('link', { name: 'Introduction', exact: true })).toHaveCount(0)
   await expect(article.getByRole('link', { name: 'Download Desktop for macOS Apple Silicon' })).toHaveAttribute('href', desktopUrl)
@@ -23,8 +23,8 @@ test('quickstart is the installation-first docs entry', async ({ page, context }
   await expect(article.locator('hr')).toHaveCount(0)
   await expect(article).not.toContainText('brew install')
   await expect(article).not.toContainText('npm install')
-  await article.getByRole('link', { name: 'Configuration', exact: true }).click()
-  await expect(page).toHaveURL('/docs/configuration')
+  await expect(article.getByRole('link', { name: 'Inference.net' }).first()).toHaveAttribute('href', 'https://inference.net')
+  await expect(article.getByRole('link', { name: 'Download Desktop for macOS Apple Silicon' })).toBeVisible()
 })
 
 for (const javaScriptEnabled of [true, false]) test.describe(`article styles with JavaScript ${javaScriptEnabled ? 'enabled' : 'disabled'}`, () => {

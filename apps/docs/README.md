@@ -219,8 +219,10 @@ change that release policy.
 ## Boundaries and validation
 
 See [the canonical frontend guide](../../docs/frontend.md) and
-[brand guide](../../docs/brand-guide.md). This app owns ordinary CSS and Base UI
-components; it intentionally does not import `@whip/ui`, SDK or product state.
+[brand guide](../../docs/brand-guide.md). This app owns Base UI components with
+co-located StyleX styles and docs-local tokens. Plain CSS is reserved for global
+base rules, token properties and MDX prose. It intentionally does not import
+`@whip/ui`, SDK or product state.
 System fonts only. Shared public types live in `features/docs/content/types.ts`.
 
 `tests/sdk-examples.test.ts` extracts TypeScript fences from the SDK page, typechecks
@@ -231,10 +233,10 @@ the docs browser bundle.
 `tests/content.test.tsx` exercises metadata/AST IDs, grammar aliases, exact source,
 escaping and real MDX nested tabs. `static-server.test.ts` tests host routing and
 filesystem isolation; `static-policy.test.ts` tests robots and highlighter leak
-sentinels. `tests/browser/*.spec.ts` visits every real page, reload/history,
+sentinels. `tests/browser/*.spec.ts` and `scripts/worker-smoke.mjs` cover every real page, reload/history,
 fragments/404/redirects, no-JS, clipboard/tab keyboard behavior, responsive widths,
 local-only requests, hydration errors, theme token changes, system/media and
-cross-tab theme sync, mobile dialog focus/links, no-JS mobile navigation and
+cross-tab theme sync, mobile adjacent-page links with and without JS, and
 clipboard rejection recovery. Component tests
 and the Board Reference Storybook cover library behavior and visual reference.
 

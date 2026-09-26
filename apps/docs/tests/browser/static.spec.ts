@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test'
 import { appRoot, loadDocuments } from '../../scripts/content.mjs'
 import { docRedirects } from '../../src/features/docs/content/redirects'
 import { docSections } from '../../src/features/docs/content/sections'
-const docs = await loadDocuments()
+const docs = (await loadDocuments()).filter((doc) => !doc.draft)
 
 test('all entry and legacy URLs redirect, even without JavaScript or host rules', async ({ page, request, browser }) => {
   for (const [from, to] of Object.entries(docRedirects)) {
@@ -25,7 +25,7 @@ test('all entry and legacy URLs redirect, even without JavaScript or host rules'
   }
 })
 
-test('all 21 pages render their headings and ordered sidebar without errors', async ({ page }) => {
+test('all published pages render their headings and ordered sidebar without errors', async ({ page }) => {
   const errors: string[] = []
   const requests: string[] = []
   page.on('pageerror', error => errors.push(error.message))
@@ -39,7 +39,8 @@ test('all 21 pages render their headings and ordered sidebar without errors', as
     await expect(page.locator('article h2, article h3')).toHaveText(doc.headings.map((heading: DocHeading) => heading.text))
     if (!['quickstart', 'download', 'typescript-sdk'].includes(doc.path)) await expect(page.locator('article > :not(h2)')).toHaveCount(0)
     await expect(page.locator('.docs-toc a')).toHaveText(doc.headings.map((heading: DocHeading) => heading.text))
-    await expect(page.locator('.docs-sidebar .sidebar-label')).toHaveText(docSections.map(section => section.label))
+    const populatedLabels = docSections.filter(section => docs.some(entry => entry.section === section.id)).map(section => section.label)
+    await expect(page.locator('.docs-sidebar .sidebar-label')).toHaveText(populatedLabels)
     await expect(page.locator('.docs-sidebar .sidebar-item')).toHaveText(docs.map(entry => entry.title))
     await expect(page.locator('.docs-sidebar [aria-current="page"]')).toHaveText(doc.title)
     await page.reload()
@@ -69,7 +70,7 @@ test('pagination, history, heading anchors and unknown routes work', async ({ pa
 
 for (const width of [320, 390, 768, 1440, 1920]) test(`responsive ${width}px layout has aligned containers and no overflow`, async ({ page }) => {
   await page.setViewportSize({ width, height: 900 })
-  for (const url of ['/','/docs','/docs/download','/docs/agents-subagents','/docs/typescript-sdk']) {
+  for (const url of ['/','/docs','/docs/download','/docs/quickstart','/docs/faq']) {
     await page.goto(url)
     await expect(page.locator('main')).toBeVisible()
     expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false)

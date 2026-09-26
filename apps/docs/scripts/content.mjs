@@ -18,7 +18,7 @@ export const generatedFile = path.join(appRoot, 'src/features/docs/content/manif
 const sections = docSections.map(section => section.id)
 const metadataSchema = z.object({
   title: z.string().trim().min(1), navTitle: z.string().trim().min(1).optional(), description: z.string().trim().min(1),
-  section: z.enum(sections), order: z.number().int().positive(),
+  section: z.enum(sections), order: z.number().int().positive(), draft: z.boolean().optional(),
 }).strict()
 
 export function parseDocument(source, filename) {
@@ -96,7 +96,7 @@ export async function loadDocuments(root = contentRoot) {
 export async function generateManifest() {
   const documents = await loadDocuments()
   for (const document of documents) for (const warning of document.warnings) console.warn(warning)
-  const metadata = documents.map(({ links, warnings, ...doc }) => doc)
+  const metadata = documents.filter((doc) => !doc.draft).map(({ links, warnings, draft, ...doc }) => doc)
   const source = `// Generated from src/content/docs. Do not edit.
 import type { DocMeta } from './types'
 export const docsManifest = ${JSON.stringify(metadata, null, 2)} satisfies DocMeta[]

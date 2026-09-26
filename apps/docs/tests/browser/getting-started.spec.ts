@@ -4,7 +4,7 @@ import { appRoot } from '../../scripts/content.mjs'
 
 test('all page outlines keep copy and download source actions', async ({ page, context }) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write'])
-  for (const slug of ['quickstart', 'download', 'typescript-sdk']) {
+  for (const slug of ['quickstart', 'download', 'faq']) {
     const source = await readFile(`${appRoot}/src/content/docs/${slug}/index.mdx`, 'utf8')
     await page.goto(`/docs/${slug}`)
     await page.getByRole('button', { name: 'Copy page', exact: true }).click()

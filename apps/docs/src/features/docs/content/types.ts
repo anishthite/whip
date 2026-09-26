@@ -7,5 +7,8 @@ export type DocMeta = {
   section: string
   order: number
   headings: DocHeading[]
+  // Drafts are excluded from the manifest, sidebar, sitemap and prerender,
+  // so they never appear on the docs site.
+  draft?: boolean
 }
 export { docSections } from './sections'

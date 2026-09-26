@@ -11,7 +11,7 @@ const root = path.join(appRoot, 'dist/client')
 const { origin, indexable: published } = docsSite()
 const base = origin ? new URL(origin).pathname.replace(/\/$/, '') : ''
 const publicPath = (url) => base + url
-const docs = await loadDocuments()
+const docs = (await loadDocuments()).filter((doc) => !doc.draft)
 const urls = [...docs.map((doc) => `/docs/${doc.path}`), '/404']
 const rendered = new Map()
 // Static-only hosts can follow legacy URLs without JavaScript or server rules.
