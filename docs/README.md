@@ -238,6 +238,8 @@ Per source: `enabled` kills the whole source, `only` is a name allowlist,
 
 How it works, from the top down:
 
+- [shipped-2026-08-24.md](shipped-2026-08-24.md) — comprehensive weekly
+  shipping note for the changes that landed on main from 24–28 August 2026.
 - [architecture.md](architecture.md) — the moving parts and how a
   command moves through clients, the daemon, policy, workers, and storage.
   Start here.
